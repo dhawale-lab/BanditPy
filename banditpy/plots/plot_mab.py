@@ -1,11 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+from matplotlib.colors import ListedColormap
 from .. import core
-
-# custom_cmap = LinearSegmentedColormap.from_list("custom", [color1, color2], N=100)
 
 
 def plot_trial_by_trial_2Arm(
@@ -14,7 +11,8 @@ def plot_trial_by_trial_2Arm(
     """
     Plot the trial-by-trial performance of a 2-armed bandit problem.
     """
-    assert isinstance(task, core.Bandit2Arm), "task must be an instance of Bandit2Arm"
+    if not isinstance(task, core.Bandit2Arm):
+        raise TypeError("task must be an instance of Bandit2Arm")
 
     choice_bool = task.is_choice_high
     ntrials_session = task.ntrials_session
@@ -45,7 +43,13 @@ def plot_trial_by_trial_2Arm(
     if sort_by_deltaprob:
         ax.spines["right"].set_visible(True)
         ax2 = ax.twinx()
-        low, mid, high = 0, task.n_sessions // 2, task.n_sessions - 1
         sorted_deltaprob = deltaprob[sort_indx].round(2)
-        ax2.set_yticks([low, mid, high], sorted_deltaprob[[low, mid, high]])
+
+        if task.n_sessions >= 3:
+            low, mid, high = 0, task.n_sessions // 2, task.n_sessions - 1
+            ax2.set_yticks([low, mid, high], sorted_deltaprob[[low, mid, high]])
+        else:
+            ticks = list(range(task.n_sessions))
+            ax2.set_yticks(ticks, sorted_deltaprob[: len(ticks)])
+
         ax2.set_ylabel("Delta probabilities")

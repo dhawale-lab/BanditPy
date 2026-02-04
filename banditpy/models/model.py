@@ -1,10 +1,10 @@
 import numpy as np
-from scipy.optimize import minimize
 from scipy.special import logsumexp
 from banditpy.core import Bandit2Arm
 from .policy.base import BasePolicy
 from tqdm import tqdm
 import os
+from .optim import resolve_optimizer
 
 
 def softmax_loglik(logits, choice, beta):
@@ -30,13 +30,20 @@ def _get_slurm_cpus(default=1):
 
 class DecisionModel:
     def __init__(self, task: Bandit2Arm, policy: BasePolicy, reset_mode="session"):
+        # Allow passing either an instance or a policy class; normalize to an instance.
+        if isinstance(policy, type) and issubclass(policy, BasePolicy):
+            policy = policy()
+
+        if not isinstance(policy, BasePolicy):
+            raise TypeError("policy must be a BasePolicy instance or subclass")
+
         self.task = task
         self.policy = policy
 
         self.reset_mode = reset_mode
         self.resets = self._compute_resets(task, reset_mode)
 
-        self.choices = np.asarray(task.choices, int) - 1
+        self.choices = np.asarray(task.choices, int) - 1  # Choices 0/1
         self.rewards = np.asarray(task.rewards, float)
 
         self.nll = None
@@ -100,6 +107,9 @@ class DecisionModel:
 
         self.policy.set_params(params)
 
+        # reset after params are set so policies that read from self.params in reset don't KeyError
+        self.policy.reset()
+
         beta = params["beta"]
         nll = 0.0
 
@@ -117,19 +127,7 @@ class DecisionModel:
 
     # -------------------- FIT --------------------
 
-    def fit(
-        self,
-        n_starts=10,
-        seed=None,
-        progress=False,
-        n_jobs=None,
-        method="lbfgs",
-        de_popsize=15,
-        de_maxiter=200,
-        de_tol=1e-6,
-    ):
-        from joblib import Parallel, delayed
-
+    def fit(self, n_starts=10, seed=None, progress=False, n_jobs=None, optimizer=None):
         rng = np.random.default_rng(seed)
 
         if n_jobs is None:
@@ -140,52 +138,19 @@ class DecisionModel:
 
         bounds_dict = self.policy.get_bounds()
         names = self.policy.param_names()
-        bounds = [bounds_dict[n] for n in names]
+        bounds = [(n, bounds_dict[n]) for n in names]
 
         seeds = rng.integers(0, 2**32 - 1, size=n_starts)
 
-        def _run_single(start_seed):
-            local_rng = np.random.default_rng(start_seed)
+        opt = resolve_optimizer(optimizer)
 
-            if method.lower() == "de":
-                from scipy.optimize import differential_evolution
-
-                res = differential_evolution(
-                    self._nll,
-                    bounds=bounds,
-                    maxiter=de_maxiter,
-                    popsize=de_popsize,
-                    tol=de_tol,
-                    seed=int(local_rng.integers(0, 2**32 - 1)),
-                    polish=True,
-                )
-                return res.fun, res.x
-
-            x0 = np.array([local_rng.uniform(*b) for b in bounds])
-            res = minimize(
-                self._nll,
-                x0,
-                method="L-BFGS-B",
-                bounds=bounds,
-            )
-            return res.fun, res.x
-
-        iterator = seeds
-        if progress:
-            try:
-                iterator = tqdm(iterator, desc="Fitting DecisionModel")
-            except Exception:
-                pass
-
-        if n_jobs == 1:
-            results = [_run_single(s) for s in iterator]
-        else:
-            results = Parallel(n_jobs=n_jobs, backend="loky")(
-                delayed(_run_single)(s) for s in iterator
-            )
-
-        best_fun, best_x = min(results, key=lambda t: t[0])
-        fvals = np.array([r[0] for r in results], dtype=float)
+        best_fun, best_x, fvals = opt.fit(
+            objective=self._nll,
+            bounds=bounds,
+            seeds=seeds,
+            n_jobs=n_jobs,
+            progress=progress,
+        )
 
         self.params = dict(zip(names, best_x))
         self.nll = best_fun
@@ -249,20 +214,56 @@ class DecisionModel:
         cls,
         policy,
         reward_schedule,
-        trials_per_block,
-        params,
+        min_trials_per_block,
+        params=None,
+        prob_switch=1.0,
         seed=None,
         metadata=None,
     ):
+        """
+        Simulate a policy on a multi-block 2-armed bandit with optional variable block lengths.
+
+        Args:
+            policy: A `BasePolicy` instance (mutated in-place during simulation).
+            reward_schedule: Sequence of `(p1, p2)` tuples; one per block specifying reward probs.
+            min_trials_per_block: Int or sequence giving the minimum trials to run per block.
+            params: Optional dict of policy parameters (must include `beta`).
+                If None, assumes the policy was already configured via `policy.set_params()`.
+            prob_switch: Float or sequence in (0, 1]; probability of switching after min trials.
+                Example: `min_trials_per_block=100`, `prob_switch=0.02` yields median ~150 trials.
+            seed: RNG seed for reproducibility.
+            metadata: Optional metadata stored on the returned `Bandit2Arm` task.
+
+        Returns:
+            Bandit2Arm: Simulated task with probs, choices, rewards, and block/session ids.
+        """
         rng = np.random.default_rng(seed)
 
-        policy.set_params(params)
+        if params is not None:
+            policy.set_params(params)
+        elif not policy.params:
+            raise ValueError(
+                "params is None and policy has no parameters set; "
+                "call policy.set_params(...) or provide params"
+            )
+
+        if "beta" not in policy.params:
+            raise ValueError("policy parameters must include 'beta'")
+
+        beta = policy.params["beta"]
         policy.reset()
 
-        if isinstance(trials_per_block, int):
-            trials_per_block = [trials_per_block] * len(reward_schedule)
+        if isinstance(min_trials_per_block, int):
+            min_trials_per_block = [min_trials_per_block] * len(reward_schedule)
 
-        assert len(trials_per_block) == len(reward_schedule)
+        if isinstance(prob_switch, (int, float)):
+            prob_switch = [prob_switch] * len(reward_schedule)
+
+        assert len(min_trials_per_block) == len(reward_schedule)
+        assert len(prob_switch) == len(reward_schedule)
+
+        if not all(0 < p <= 1 for p in prob_switch):
+            raise ValueError("prob_switch must be in (0, 1]")
 
         probs_list, choices, rewards = [], [], []
         session_ids, block_ids = [], []
@@ -270,21 +271,28 @@ class DecisionModel:
         session_counter = 1
         block_counter = 1
 
-        for (p1, p2), n_trials in zip(reward_schedule, trials_per_block):
-            block_probs = np.tile([p1, p2], (n_trials, 1))
+        for (p1, p2), n_trials, p_switch in zip(
+            reward_schedule, min_trials_per_block, prob_switch
+        ):
+            trials_in_block = 0
 
-            for t in range(n_trials):
+            while True:
                 logits = policy.logits()
-                c = softmax_sample(logits, beta=params["beta"], rng=rng)
-                r = int(rng.random() < block_probs[t, c])
+                c = softmax_sample(logits, beta=beta, rng=rng)
+                r = int(rng.random() < [p1, p2][c])
 
                 policy.update(c, r)
 
-                probs_list.append(block_probs[t])
+                probs_list.append([p1, p2])
                 choices.append(c + 1)
                 rewards.append(r)
                 session_ids.append(session_counter)
                 block_ids.append(block_counter)
+
+                trials_in_block += 1
+
+                if trials_in_block >= n_trials and rng.random() < p_switch:
+                    break
 
             session_counter += 1
             block_counter += 1

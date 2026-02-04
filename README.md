@@ -1,23 +1,25 @@
 # BanditPy
 
-BanditPy is a toolkit for parsing, analyzing, and modeling behavior in two-armed bandit experiments. It bundles data ingestion utilities, task containers, and multiple decision-making models that can be mixed and matched for comparative studies.
+Tools for loading, structuring, simulating, and fitting two-armed bandit behavior. The codebase now centers on a flexible `DecisionModel` + `Policy` stack, with pluggable optimizers and lightweight data containers.
 
-## Features
-- Structured data containers in [banditpy/core/mab.py](banditpy/core/mab.py) with session, block, and window metadata, filtering helpers, and pandas export.
-- Turnkey `.dat` log loader in [banditpy/io/datio.py](banditpy/io/datio.py) that reconstructs trials, timestamps, and reward probabilities from raw hardware exports.
-- Model zoo covering Q-learning, logistic regression, Thompson sampling, and UCB variants inside [banditpy/models](banditpy/models) with likelihood-based fitting and diagnostic helpers.
-- Ready-to-use behavioral metrics such as switching analyses in [banditpy/analyses/switch_probability.py](banditpy/analyses/switch_probability.py).
-- Plotting and utility helpers in [banditpy/plots](banditpy/plots) and [banditpy/utils](banditpy/utils) to streamline exploratory workflows.
+## Highlights
+- Data containers in [banditpy/core/mab.py](banditpy/core/mab.py) for trial-wise probabilities, choices, rewards, and session/block/window metadata, plus filtering, binning, and pandas export helpers.
+- Turnkey loaders for hardware logs: `.dat` ingestion in [banditpy/io/datio.py](banditpy/io/datio.py) and CSV ingestion in [banditpy/io/csvio.py](banditpy/io/csvio.py) that reconstruct `Bandit2Arm` tasks with timing metadata.
+- Policy-driven modeling in [banditpy/models/model.py](banditpy/models/model.py) with Q-learning, UCB, Thompson sampling, and state-inference policies under [banditpy/models/policy](banditpy/models/policy) and optimizer backends in [banditpy/models/optim.py](banditpy/models/optim.py).
+- Posterior predictive checks and forward simulation via `DecisionModel.simulate_posterior_predictive()` and `DecisionModel.simulate_policy()` for synthetic datasets.
+- Quick behavioral metrics such as switch probability in [banditpy/analyses/switch_probability.py](banditpy/analyses/switch_probability.py) and plotting helpers in [banditpy/plots](banditpy/plots).
 
 ## Installation
-1. Clone the repository and move into it.
-2. Create and activate a Python 3.10+ environment.
-3. Install in editable mode and add the scientific stack:
+The repository is source-only (no packaging metadata). Add it to your Python path and install the scientific stack:
 
+```pwsh
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -U pip numpy pandas scipy joblib tqdm optuna matplotlib seaborn
+setx PYTHONPATH "%PYTHONPATH%;C:\Users\asheshlab\Documents\Codes\BanditPy"
 ```
-pip install -e .
-pip install numpy pandas scipy scikit-learn
-```
+
+If you prefer editable installs, add a minimal `pyproject.toml`/`setup.py` first, then run `pip install -e .`.
 
 ## Quickstart
 
@@ -25,53 +27,51 @@ pip install numpy pandas scipy scikit-learn
 from pathlib import Path
 
 from banditpy.io.datio import dat2ArmIO
-from banditpy.models.qlearn import Qlearn2Arm
-from banditpy.models.ucb import UCB2Arm
-from banditpy.models.thompson_models import Thompson2Arm
+from banditpy.models.model import DecisionModel
+from banditpy.models.policy import Qlearn2Arm, ThompsonShared2Arm
 from banditpy.analyses.switch_probability import SwitchProb2Arm
 
-# Load and lightly filter a session
-task = dat2ArmIO(Path("/path/to/dat_logs"))
-task = task.filter_by_trials(min_trials=50)
+# 1) Load raw logs → Bandit2Arm
+task = dat2ArmIO(Path("/path/to/session_folder"))
+task = task.filter_by_trials(min_trials=80, clip_max=400)
 
-# Fit a vanilla Q-learning model
-q_model = Qlearn2Arm(task, model="vanilla")
-q_model.fit(
-    bounds=[(1e-3, 1.0), (1e-3, 1.0), (0.1, 15.0)],
-    n_optimize=10,
-)
-q_model.print_params()
+# 2) Fit a policy with multiple random starts
+model = DecisionModel(task, policy=Qlearn2Arm(), reset_mode="session")
+model.fit(n_starts=20, optimizer="de", n_jobs=4, progress=True)
+print(model.params)
 
-# Compare an exploration-based alternative
-ucb_model = UCB2Arm(task, mode="bayesian")
-ucb_model.fit(n_starts=5)
-ucb_model.print_params()
+# 3) Compare an alternative policy (shared Thompson sampling)
+th_model = DecisionModel(task, policy=ThompsonShared2Arm(use_analytic=True))
+th_model.fit(n_starts=10, optimizer="lbfgs")
+print(th_model.params)
 
-# Inspect posterior dynamics under Thompson sampling
-th_model = Thompson2Arm(task, lr_mode="shared", use_analytic=False)
-th_model.fit(n_starts=5)
-alpha_traj, beta_traj, means = th_model.simulate_posteriors()
+# 4) Posterior predictive simulation
+sim_task = model.simulate_posterior_predictive(seed=0)
 
-# Basic switching statistics
-switch_prob = SwitchProb2Arm(task).by_session()
-print(f"Mean switch probability: {switch_prob:.3f}")
+# 5) Basic behavior metric
+switch_rate = SwitchProb2Arm(task).by_session()
+print(f"Mean switch probability: {switch_rate:.3f}")
 ```
 
-## Module Guide
-- [banditpy/core](banditpy/core) – DataManager and BanditTask abstractions with metadata handling and segmentation utilities.
-- [banditpy/io](banditpy/io) – Parsers for raw behavior logs and helpers for building Bandit2Arm objects from disk.
-- [banditpy/models/qlearn.py](banditpy/models/qlearn.py) – Classical and perseveration-augmented Q-learning with differential evolution fitting.
-- [banditpy/models/regression_models.py](banditpy/models/regression_models.py) – Logistic regression over choice/reward histories with coefficient summaries.
-- [banditpy/models/thompson_models.py](banditpy/models/thompson_models.py) – Discounted Thompson sampling with flexible learning-rate tying and posterior inspection.
-- [banditpy/models/ucb.py](banditpy/models/ucb.py) – Classic, Bayesian, and reinforcement-learning-flavored UCB families with softmax decision policies.
-- [banditpy/analyses](banditpy/analyses) – Trial-wise and session-wise behavioral metrics, exemplified by switching probability.
+## Policy Catalog (plug into `DecisionModel`)
+- Q-learning: vanilla and perseverance-biased variants in [banditpy/models/policy/qlearn.py](banditpy/models/policy/qlearn.py)
+- UCB family: empirical, RL-corrected, and Bayesian flavors in [banditpy/models/policy/ucb.py](banditpy/models/policy/ucb.py)
+- Thompson sampling: shared vs. fully split learning rates, analytic or Monte Carlo logits in [banditpy/models/policy/thompson.py](banditpy/models/policy/thompson.py)
+- State inference: latent state tracking with softmax decisions in [banditpy/models/policy/state_inference.py](banditpy/models/policy/state_inference.py)
 
-## Data Expectations
-- Two-armed tasks assume choices encoded as 1/2 with Bernoulli rewards (0/1).
-- `.dat` logs must provide event codes, arguments, outcome probabilities, and timestamps as produced by the DIBA lab acquisition software.
-- For direct construction of Bandit2Arm objects, provide arrays for `probs`, `choices`, `rewards`, and `session_ids`, optionally adding block/window labels and absolute timestamps.
+Each policy exposes parameter bounds and defaults through `policy.bounds` and `policy.describe(as_markdown=True)` for quick reporting.
+
+## Data Conventions
+- Choices are 1/2; rewards are Bernoulli (0/1). `Bandit2Arm` normalizes probabilities given in 0–100% or 0–1 form.
+- Session IDs should monotonically increase; helper methods auto-fix negative jumps and can infer blocks/windows from datetimes.
+- `.dat` and `.csv` loaders expect the DIBA lab event schema (see loader docstrings) and preserve start/stop timestamps in milliseconds plus absolute `datetime` if provided.
+
+## Fitting and Simulation Tips
+- `reset_mode` controls when internal policy state resets: `"session"`, `"block"`, `"window"`, or a custom boolean mask matching the trial count.
+- Optimizers: `lbfgs` (default), differential evolution (`"de"`), or Optuna (`"optuna"`). Configure seeds and bounds via the policy’s `bounds` registry.
+- Use `DecisionModel.simulate_policy(...)` to generate synthetic datasets under a specified reward schedule and block structure.
 
 ## Contributing
-- File issues or pull requests describing the dataset or model you want to support.
-- Follow PEP8, document non-obvious logic inline, and add minimal usage examples for new components.
-- Run model fits on a small synthetic dataset to ensure likelihood functions remain well-behaved before submitting changes.
+- Open issues for new loaders, policies, or metrics you want to add.
+- Keep docstrings current and prefer small reproducible examples for new features.
+- Run lightweight fits on synthetic data before submitting changes to ensure likelihoods and gradients behave as expected.

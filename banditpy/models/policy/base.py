@@ -67,7 +67,14 @@ class BoundsRegistry:
 
 class BasePolicy:
     """
-    Subclasses define `parameters = [ParameterSpec(...), ...]`
+    Subclasses define `parameters = [ParameterSpec(...), ...]`.
+
+    Lifecycle:
+        __init__()  → reset()  (policy starts in a valid state)
+        reset()     → initialize state for a new session
+        forget()    → optional decay step between trials
+        logits()    → compute choice values
+        update()    → apply learning update
     """
 
     parameters: List[ParameterSpec] = []
@@ -77,9 +84,10 @@ class BasePolicy:
             p.name: p.copy() for p in self.parameters
         }
 
+        # Runtime parameter values after fit() or set_params()
         self.params: Dict[str, float] = {}
 
-        # new API: dict-style bounds registry
+        # Dict-style bounds API
         self.bounds = BoundsRegistry(self._param_specs)
 
     # ---------------- Parameter API ----------------
@@ -109,10 +117,6 @@ class BasePolicy:
         return {k: p.default for k, p in self._param_specs.items()}
 
     def parameter_specs(self):
-        """
-        Return a dict of ParameterSpec objects keyed by parameter name.
-        This is a stable public accessor over the internal _param_specs.
-        """
         return self._param_specs
 
     def describe(self, as_markdown: bool = False):
@@ -126,7 +130,6 @@ class BasePolicy:
         """
 
         specs = self._param_specs.values()
-
         headers = ["Parameter", "Bounds", "Default", "Active", "Description"]
 
         rows = []
@@ -142,37 +145,34 @@ class BasePolicy:
                 ]
             )
 
-        # ---------- Console Table ----------
+        # ---- Console table ----
         if not as_markdown:
-            col_widths = [14, 18, 8, 8, 50]
-
             print(
                 f"{headers[0]:<14}{headers[1]:<18}{headers[2]:<8}"
                 f"{headers[3]:<8}{headers[4]}"
             )
             print("-" * 90)
-
             for r in rows:
                 print(f"{r[0]:<14}{r[1]:<18}{r[2]:<8}{r[3]:<8}{r[4]}")
             return
 
-        # ---------- Markdown Export ----------
+        # ---- Markdown export ----
         md = [
             "| Parameter | Bounds | Default | Active | Description |",
             "|----------:|--------|--------:|:------:|-------------|",
         ]
-
         for r in rows:
             md.append(f"| {r[0]} | `{r[1]}` | {r[2]} | {r[3]} | {r[4]} |")
-
         return "\n".join(md)
 
-    # ------------- lifecycle hooks -----------------
+    # ---------------- Lifecycle hooks ----------------
 
     def reset(self):
+        """Initialize internal state (must be implemented by subclasses)."""
         raise NotImplementedError
 
     def forget(self):
+        """Optional decay step; default is a no-op."""
         pass
 
     def logits(self):

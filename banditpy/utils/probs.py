@@ -1,84 +1,67 @@
 import numpy as np
 
 
+def _sample_pairs(p, n, rng, structured):
+    """Sample probability pairs; structured pairs sum to 1, unstructured pairs do not."""
+    p1 = rng.choice(p, size=n, replace=True)
+    p2 = np.empty_like(p1, dtype=float)
+
+    for i, val in enumerate(p1):
+        if structured:
+            p2[i] = np.round(1 - val, 1)
+        else:
+            # pick any probability that is neither equal to p1 nor the structured complement
+            options = np.setdiff1d(p, [val, np.round(1 - val, 1)])
+            p2[i] = rng.choice(options)
+
+        # if equality sneaks in, resample that element
+        if p2[i] == val:
+            options = np.setdiff1d(p, [val]) if structured else np.setdiff1d(p, [val, p2[i]])
+            p2[i] = rng.choice(options)
+
+    return np.column_stack((p1, p2))
+
+
 def generate_probs_2arm(p=None, N=1000, frac_impurity=0.16):
-    """Generate probabilities for a 2-arm bandit task from a given set of probabilities. Where for,
-        unstructured environments: the sum of probabilities is not equal to 1 and includes a minority of strucutured probabilities.
+    """Generate structured (sum to 1) and unstructured (sum != 1) 2-arm probabilities.
 
-        structured environments: the sum of probabilities is equal to 1 and includes a minority of unstructured probabilities.
-
-
-    Note: Equal probabilities are not allowed, i.e., p1 != p2.
-
-
-    Parameters
-    ----------
-    p : _type_
-        _description_
-    N : int, optional
-        Number of probabilities to generate, by default 1000.
-    frac_impurity : float
-        Fraction of probabilities that are impure (i.e., fraction of unstructured in structured and vice versa).
-
-    Returns
-    -------
-    tuple
-        Tuple containing two numpy arrays:
-        - pu_new: Unstructured probabilities (shape: N x 2)
-        - ps_new: Structured probabilities (shape: N x 2)
+    Returns a tuple `(pu, ps)` each of shape (N, 2), with a fraction `frac_impurity`
+    of cross-contamination between structured and unstructured sets. Equal-arm pairs
+    are excluded.
     """
     if p is None:
         p = np.array([0.2, 0.3, 0.4, 0.6, 0.7, 0.8])
 
-    assert frac_impurity < 0.5, "Fraction of impure probabilities must be less than 0.5"
+    if not (0 <= frac_impurity < 0.5):
+        raise ValueError("frac_impurity must be in [0, 0.5)")
 
     rng = np.random.default_rng()
 
-    n_impure = int(N * frac_impurity)  # number of divergent probs
-    n_pure = N - n_impure  # number of structured probs
+    n_impure = int(N * frac_impurity)
+    n_pure = N - n_impure
 
-    # structured probabilities
-    p1s = np.random.choice(p, size=n_pure, replace=True)
-    p2s = np.round(1 - p1s, 1)
-    ps = np.array([p1s, p2s]).T
+    # Structured set: mostly sums to 1, with impure unstructured pairs mixed in
+    ps_struct = _sample_pairs(p, n_pure, rng, structured=True)
+    ps_impure = _sample_pairs(p, n_impure, rng, structured=False)
+    ps = np.vstack((ps_struct, ps_impure))
+    rng.shuffle(ps)
 
-    # stuctured impurities (i.e unstructured probabilities)
-    p1su = np.random.choice(p, size=n_impure, replace=True)
-    p2su = np.array(
-        [np.random.choice(np.setdiff1d(p, [val, np.round(1 - val, 1)])) for val in p1su]
-    )
-    psu = np.array([p1su, p2su]).T
+    # Unstructured set: mostly not summing to 1, with impure structured pairs mixed in
+    pu_unstruct = _sample_pairs(p, n_pure, rng, structured=False)
+    pu_impure = _sample_pairs(p, n_impure, rng, structured=True)
+    pu = np.vstack((pu_unstruct, pu_impure))
+    rng.shuffle(pu)
 
-    ps_new = np.concatenate((ps, psu), axis=0)
-    rng.shuffle(ps_new)
+    # Sanity checks with tolerance for floating rounding
+    ps_sum = ps.sum(axis=1)
+    pu_sum = pu.sum(axis=1)
+    frac_u_in_s = np.mean(~np.isclose(ps_sum, 1.0))
+    frac_s_in_u = np.mean(np.isclose(pu_sum, 1.0))
 
-    # unstructured probabilities
-    p1u = np.random.choice(p, size=n_pure, replace=True)
-    p2u = np.array(
-        [np.random.choice(np.setdiff1d(p, [val, np.round(1 - val, 1)])) for val in p1u]
-    )
-    pu = np.array([p1u, p2u]).T
+    if frac_u_in_s > frac_impurity + 1e-6 or frac_s_in_u > frac_impurity + 1e-6:
+        raise AssertionError("frac_impurity violated")
 
-    # unstructured impurities (i.e structured probabilities)
-    p1us = np.random.choice(p, size=n_impure, replace=True)
-    p2us = np.round(1 - p1us, 1)
-    pus = np.array([p1us, p2us]).T
+    if np.any(np.isclose(ps[:, 0], ps[:, 1])) or np.any(np.isclose(pu[:, 0], pu[:, 1])):
+        raise AssertionError("Equal probabilities detected")
 
-    pu_new = np.concatenate((pu, pus), axis=0)
-    rng.shuffle(pu_new)
-
-    # Count how many impure probabilities
-    ps_sum = ps_new.sum(axis=1)
-    pu_sum = pu_new.sum(axis=1)
-    frac_u_in_s = np.sum(ps_sum != 1) / N  # unstructured in structured
-    frac_s_in_u = np.sum(pu_sum == 1) / N  # structured in unstructured
-    frac_equal_s = np.sum(ps_new[:, 0] == ps_new[:, 1]) / N
-    frac_equal_u = np.sum(pu_new[:, 0] == pu_new[:, 1]) / N
-
-    assert frac_equal_s == 0, "There are equal probabilities in structured"
-    assert frac_equal_u == 0, "There are equal probabilities in unstructured"
-
-    assert frac_u_in_s == frac_impurity, "frac_impurity violated in structured"
-    assert frac_s_in_u == frac_impurity, "frac_impurity violated in unstructured"
-
-    return pu_new, ps_new
+    return pu, ps

@@ -147,12 +147,12 @@ class BanditTask(DataManager):
 
     @staticmethod
     def _fix_datetime(datetime):
-        if datetime.ndim == 2:
-            datetime = np.squeeze(datetime)
         if datetime is None:
             return None
-        datetime = np.array(datetime)
-        if np.issubdtype(datetime.dtype, np.number):
+        elif datetime.ndim == 2:
+            datetime = np.squeeze(datetime)
+            datetime = np.array(datetime)
+        elif np.issubdtype(datetime.dtype, np.number):
             datetime = datetime.astype("datetime64[s]")
         return datetime
 
@@ -226,9 +226,115 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
-    def filter_by_session_id(self, ids):
-        mask = np.isin(self.session_ids, ids)
+    def filter_by_session_id(self, start=None, stop=None, ids=None):
+        """Filter trials by session id(s).
+
+        Priority: explicit ``ids`` overrides ``start``/``stop`` bounds.
+        """
+
+        session_ids = np.asarray(self.session_ids)
+
+        if ids is not None:
+            target_ids = np.asarray(list(np.atleast_1d(ids)))
+            mask = np.isin(session_ids, target_ids)
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to filter sessions")
+
+            if start is None:
+                start = session_ids.min()
+            if stop is None:
+                stop = session_ids.max()
+
+            mask = (session_ids >= start) & (session_ids <= stop)
+
         return self._filtered(mask)
+
+    def filter_by_block_id(self, start=None, stop=None, ids=None):
+        """
+        Filter trials by block_id.
+
+        Parameters
+        ----------
+        start : int, optional
+            Inclusive lower bound for block_id (e.g., 2 for "2 onward").
+        stop : int, optional
+            Inclusive upper bound for block_id (e.g., 3 for "1 to 3").
+        ids : iterable of int, optional
+            Explicit set/list of block_ids to keep (overrides start/end if provided).
+
+        Examples
+        --------
+        - Blocks 1 only: filter_by_block_id(start=1, stop=1)
+        - Blocks 1-3:    filter_by_block_id(start=1, stop=3)
+        - Blocks 2+:     filter_by_block_id(start=2)
+        """
+        if self.block_ids is None:
+            raise ValueError("block_ids must be set to filter by block")
+
+        block_ids = np.asarray(self.block_ids)
+
+        if ids is not None:
+            ids = np.asarray(list(ids))
+            mask = np.isin(block_ids, ids)
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to filter blocks")
+
+            if start is None:
+                start = block_ids.min()
+            if stop is None:
+                stop = block_ids.max()
+
+            mask = (block_ids >= start) & (block_ids <= stop)
+
+        return self._filtered(mask)
+
+    def get_block_start_mask(self, start=None, stop=None, ids=None):
+        """
+        Boolean mask marking the first trial of specified blocks.
+
+        Parameters
+        ----------
+        start : int, optional
+            Inclusive lower bound for block_id (e.g., 2 for "2 onward").
+        stop : int, optional
+            Inclusive upper bound for block_id.
+        ids : iterable of int, optional
+            Explicit block_ids to mark; overrides start/stop if provided.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean array of shape (n_trials,) with True at the first trial of
+            the selected blocks and False elsewhere.
+        """
+        if self.block_ids is None:
+            raise ValueError("block_ids must be set to compute block starts")
+
+        block_ids = np.asarray(self.block_ids)
+
+        if ids is not None:
+            target_ids = set(np.asarray(list(ids)).tolist())
+        else:
+            if start is None and stop is None:
+                raise ValueError("Provide start/stop or ids to select block starts")
+            if start is None:
+                start = block_ids.min()
+            if stop is None:
+                stop = block_ids.max()
+            target_ids = set(range(int(start), int(stop) + 1))
+
+        # Identify block start indices
+        block_start_bool = np.concatenate(([True], block_ids[1:] != block_ids[:-1]))
+        start_indices = np.where(block_start_bool)[0]
+
+        mask = np.zeros_like(block_ids, dtype=bool)
+        for idx in start_indices:
+            if block_ids[idx] in target_ids:
+                mask[idx] = True
+
+        return mask
 
     def _filtered(self, mask):
         """Return a new instance of the same class with filtered data."""
@@ -618,7 +724,7 @@ class Bandit2Arm(BanditTask):
 
         return stats.entropy(choices_prob, base=2, axis=0)
 
-    def get_prob_hist_2d(self, stat="count"):
+    def get_prob_hist2d(self, stat="count"):
         """Get the probability matrix for each session. Calculates a 2D histogram of the reward probabilities.
 
         Returns
@@ -656,13 +762,17 @@ class Bandit2Arm(BanditTask):
 
         return h, bins[:-1] + bin_size / 2
 
-    def get_performance_prob_grid(self, n_last_trials=5):
+    def get_performance_prob_grid(
+        self, n_last_trials=5, performance_metric="optimal_choice"
+    ):
         """Get performance grid based on reward probabilities.
 
         Parameters
         ----------
-        bin_size : float, optional
-            Size of the bins for reward probabilities, by default 0.1
+        n_last_trials : int, optional
+            Number of last trials to consider for performance calculation, by default 5
+        performance_metric : str, optional
+            Metric to use for performance calculation, by default "optimal_choice"
 
         Returns
         -------
@@ -686,10 +796,12 @@ class Bandit2Arm(BanditTask):
 
                 if mask.sum() > 100:
                     task_p1p2 = self._filtered(mask)
-                    perf_p1p2 = task_p1p2.get_optimal_choice_probability()[
-                        -n_last_trials:
-                    ].mean()
-                    perf_mat[i1, i2] = perf_p1p2
+                    if performance_metric == "optimal_choice":
+                        perf_p1p2 = task_p1p2.get_optimal_choice_probability()
+                    if performance_metric == "reward_rate":
+                        perf_p1p2 = task_p1p2.get_reward_probability()
+
+                    perf_mat[i1, i2] = perf_p1p2[-n_last_trials:].mean()
 
         return perf_mat, unique_probs
 
