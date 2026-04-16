@@ -13,9 +13,9 @@ class Logistic2Arm:
     def __init__(self, task: core.Bandit2Arm, n_past=5):
         assert task.n_ports == 2, "Only 2-armed bandit task is supported"
         self.choices, self.rewards = self._reformat_choices_rewards(
-            task.choices, task.rewards
+            task.choices.copy(), task.rewards.copy()
         )
-        self.rewards = task.rewards
+        self.rewards = task.rewards.copy()
         self.n_past = n_past
         self.model = LogisticRegression(solver="lbfgs")
         self.feature_names = []

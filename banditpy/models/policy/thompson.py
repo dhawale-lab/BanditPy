@@ -16,6 +16,7 @@ class BaseThompson2Arm(BasePolicy):
         super().__init__()
         self.n_sim = n_sim
         self.use_analytic = use_analytic
+        self.bounds["beta"] = (0.1, 20.0)
 
     # --- State lifecycle ---
 
@@ -85,7 +86,6 @@ class ThompsonShared2Arm(BaseThompson2Arm):
         ParameterSpec("tau", (0.1, 0.999), description="Decay factor"),
         ParameterSpec("lr_chosen", (0.0, 1.0), description="LR (chosen arm)"),
         ParameterSpec("lr_unchosen", (0.0, 1.0), description="LR (unchosen arm)"),
-        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
     ]
 
     def update(self, choice, reward):
@@ -123,7 +123,6 @@ class ThompsonSplit2Arm(BaseThompson2Arm):
         ParameterSpec(
             "lr_u_neg", (0.0, 1.0), description="LR (unchosen arm, no reward)"
         ),
-        ParameterSpec("beta", (0.1, 20.0), description="Inverse temperature"),
     ]
 
     def update(self, choice, reward):

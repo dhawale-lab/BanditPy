@@ -1330,7 +1330,7 @@ class BanditModelFreeAgent2Arm:
 
 
 # ---------------------------------------------------------------------------
-# TinyBehaviorRNN: Supervised log-likelihood behavioral RNN (paper-style)
+# TinyBehaviorRNN: Supervised log-likelihood behavioral RNN
 # ---------------------------------------------------------------------------
 
 
@@ -1896,7 +1896,7 @@ def nested_cross_validation_tiny_behavior(
 
 
 # ---------------------------------------------------------------------------
-# Improved, paper-faithful nested CV (no leakage) with hidden size grid
+# nested CV (no leakage) with hidden size grid more close to Ji-An 2025 paper
 # ---------------------------------------------------------------------------
 def nested_cross_validation_tiny_behavior_v2(
     data,

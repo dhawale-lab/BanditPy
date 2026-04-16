@@ -19,13 +19,11 @@ class StateInference2Arm(BasePolicy):
         ParameterSpec(
             "b0", (0.0, 1.0), default=0.5, description="Initial belief P(s=0)"
         ),
-        ParameterSpec(
-            "beta",
-            (0.1, 20.0),
-            default=10.0,
-            description="Inverse temperature for softmax",
-        ),
     ]
+
+    def __init__(self):
+        super().__init__()
+        self.bounds["beta"] = (0.1, 20.0)
 
     def reset(self):
         p0 = np.clip(self.params["b0"], 1e-6, 1 - 1e-6)

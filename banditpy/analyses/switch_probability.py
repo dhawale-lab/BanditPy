@@ -73,7 +73,7 @@ class SwitchProb2Arm:
 
         return switch_prob
 
-    def by_history(self, n_past, history_as_str=False):
+    def by_history(self, n_past):
         """Get the probability of switching between ports as a function of history.
 
         References
@@ -90,7 +90,7 @@ class SwitchProb2Arm:
         array
             The probability of switching on next action. If your n_past is 3, then probability of switching on next choice given unique sequence of 3 past actions/rewards.
         array_like
-            Unique sequences. Coded as 1,-1,2,-2. Where positive numbers are rewarded and negative numbers are unrewarded. 1 -> animal stayed with previous choice, 2 -> switched to the other port.
+            Unique sequences. Coded as a,A,b,B representing same-unrewarded, same-rewarded, switched-unrewarded, switched-rewarded repectively.
 
 
         """
@@ -99,61 +99,37 @@ class SwitchProb2Arm:
         # Calculate switches (change in choices)
         choices = self.task.choices.copy()
         rewards = self.task.rewards.copy()
-        rewards[rewards == 0] = -1
 
-        def merge_symmetry(arr):
-            if arr[0] == 2:
-                new_arr = arr.copy()
-                indx1 = np.where(arr == 1)[0]
-                indx2 = np.where(arr == 2)[0]
-                new_arr[indx1] = 2
-                new_arr[indx2] = 1
-                return new_arr
-            else:
-                return arr
+        switches = np.diff(choices)  # length is n_trials - 1
+        switches_bool = switches != 0
+        rewards = rewards[1:]  # length is n_trials - 1
 
-        # Converting to history view slices
-        choices_history = sliding_window_view(choices, n_past)[:-1]
-        choices_history = np.array([merge_symmetry(_) for _ in choices_history])
-        rewards_history = sliding_window_view(rewards, n_past)[:-1]
+        letter_code = np.empty_like(switches, dtype="<U1")
+        letter_code[(switches == 0) & (rewards == 0)] = "a"
+        letter_code[(switches == 0) & (rewards == 1)] = "A"
+        letter_code[(switches != 0) & (rewards == 0)] = "b"
+        letter_code[(switches != 0) & (rewards == 1)] = "B"
 
-        # Encoding reward in choices
-        choices_x_reward = choices_history * rewards_history
+        # converting into n_past slices
+        letter_code = sliding_window_view(letter_code, n_past)[:-1]
+        # merging into single string
+        letter_code = np.array(["".join(_) for _ in letter_code])
+        seq_switches = switches_bool[n_past : len(letter_code) + n_past]
 
-        switches = (np.diff(choices, prepend=choices[0]) != 0)[n_past : len(choices)]
+        unq_history = np.unique(letter_code)
+        unq_indx = [np.where(letter_code == _)[0] for _ in unq_history]
+        switch_prob = np.array([np.mean(seq_switches[_]) for _ in unq_indx])
 
-        unq_history = np.unique(choices_x_reward, axis=0)
-        unq_indx = [
-            np.where(np.all(choices_x_reward == _, axis=1))[0] for _ in unq_history
-        ]
-        switch_prob = np.array([np.mean(switches[_]) for _ in unq_indx])
+        def sort_key(row):
+            return (
+                row[2].upper(),
+                row[2].islower(),
+                row[1].upper(),
+                row[1].islower(),
+            )
 
-        if history_as_str:
-            seq = unq_history.astype(str)
-            seq[seq == "-1"] = "a"
-            seq[seq == "1"] = "A"
-            seq[seq == "-2"] = "b"
-            seq[seq == "2"] = "B"
+        sorted_seq = np.array(sorted(unq_history, key=sort_key))
+        sort_indx = np.array([np.where(unq_history == _)[0][0] for _ in sorted_seq])
+        switch_prob = switch_prob[sort_indx]
 
-            print(seq)
-
-            # sort_indx = np.lexsort((seq[:, 1], seq[:, 2]))
-            arr = np.array(list(zip(seq[:, -1], seq[:, -2], np.arange(seq.shape[0]))))
-
-            def sort_key(row):
-                return (
-                    row[0].upper(),
-                    row[0].islower(),
-                    row[1].upper(),
-                    row[1].islower(),
-                )
-
-            sorted_arr = np.array(sorted(arr, key=sort_key))
-            sort_indx = sorted_arr[:, -1].astype(int)
-
-            seq = np.array(["".join(map(str, _)) for _ in seq])
-
-            return switch_prob[sort_indx], seq[sort_indx]
-
-        else:
-            return switch_prob, unq_history
+        return switch_prob, sorted_seq

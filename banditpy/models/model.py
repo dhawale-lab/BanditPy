@@ -7,14 +7,19 @@ import os
 from .optim import resolve_optimizer
 
 
-def softmax_loglik(logits, choice, beta):
+def softmax_loglik(logits, choice, beta, epsilon=0.0):
     z = beta * logits
-    return z[choice] - logsumexp(z)
+    p = np.exp(z[choice] - logsumexp(z))
+    if epsilon > 0:
+        p = (1 - epsilon) * p + epsilon / len(logits)
+    return np.log(p + 1e-12)
 
 
-def softmax_sample(logits, beta, rng):
+def softmax_sample(logits, beta, rng, epsilon=0.0):
     z = beta * logits
     p = np.exp(z - logsumexp(z))
+    if epsilon > 0:
+        p = (1 - epsilon) * p + epsilon / len(p)
     return rng.choice(len(p), p=p)
 
 
@@ -101,9 +106,21 @@ class DecisionModel:
 
     # -------------------- NLL --------------------
 
-    def _nll(self, theta):
-        names = self.policy.param_names()
-        params = dict(zip(names, theta))
+    def _nll(
+        self,
+        theta,
+        best_nll=None,
+        warmup_trials=80,
+        check_every=25,
+        slack=0.02,
+    ):
+        active_names = self.policy.active_parameter_names()
+        params = dict(zip(active_names, theta))
+
+        # Fill defaults for inactive parameters
+        for name, spec in self.policy.parameter_specs().items():
+            if name not in params:
+                params[name] = spec.default if spec.default is not None else 0.0
 
         self.policy.set_params(params)
 
@@ -111,23 +128,50 @@ class DecisionModel:
         self.policy.reset()
 
         beta = params["beta"]
+        epsilon = params.get("epsilon", 0.0)
         nll = 0.0
+        n_trials = len(self.choices)
 
-        for c, r, reset in zip(self.choices, self.rewards, self.resets):
+        do_early_stop = (
+            best_nll is not None
+            and np.isfinite(best_nll)
+            and check_every is not None
+            and check_every > 0
+        )
+
+        for t, (c, r, reset) in enumerate(
+            zip(self.choices, self.rewards, self.resets), start=1
+        ):
             if reset:
                 self.policy.reset()
             else:
                 self.policy.forget()
 
             logits = self.policy.logits()
-            nll -= softmax_loglik(logits, c, beta)
+            nll -= softmax_loglik(logits, c, beta, epsilon)
             self.policy.update(c, r)
+
+            # Cumulative NLL is monotonic, so this is a safe pruning criterion.
+            if do_early_stop and t >= warmup_trials and (t % check_every == 0):
+                if nll > best_nll * (1.0 + slack):
+                    return nll
 
         return nll
 
     # -------------------- FIT --------------------
 
-    def fit(self, n_starts=10, seed=None, progress=False, n_jobs=None, optimizer=None):
+    def fit(
+        self,
+        n_starts=10,
+        seed=None,
+        progress=False,
+        n_jobs=None,
+        optimizer=None,
+        early_stop=False,
+        es_warmup_trials=3000,  # roughly 10% of total trials
+        es_check_every=250,  # check every 250 trials after warmup
+        es_slack=0.01,  # Keep if within 1% of best NLL seen so far
+    ):
         rng = np.random.default_rng(seed)
 
         if n_jobs is None:
@@ -137,15 +181,33 @@ class DecisionModel:
         print(f"Using {n_jobs} workers")
 
         bounds_dict = self.policy.get_bounds()
-        names = self.policy.param_names()
+        names = self.policy.active_parameter_names()
         bounds = [(n, bounds_dict[n]) for n in names]
 
         seeds = rng.integers(0, 2**32 - 1, size=n_starts)
 
         opt = resolve_optimizer(optimizer)
 
+        if early_stop:
+            best_seen = [np.inf]
+
+            def objective(theta):
+                val = self._nll(
+                    theta,
+                    best_nll=best_seen[0],
+                    warmup_trials=es_warmup_trials,
+                    check_every=es_check_every,
+                    slack=es_slack,
+                )
+                if np.isfinite(val) and val < best_seen[0]:
+                    best_seen[0] = val
+                return val
+
+        else:
+            objective = self._nll
+
         best_fun, best_x, fvals = opt.fit(
-            objective=self._nll,
+            objective=objective,
             bounds=bounds,
             seeds=seeds,
             n_jobs=n_jobs,
@@ -153,6 +215,12 @@ class DecisionModel:
         )
 
         self.params = dict(zip(names, best_x))
+
+        # Fill defaults for inactive parameters
+        for name, spec in self.policy.parameter_specs().items():
+            if name not in self.params:
+                self.params[name] = spec.default if spec.default is not None else 0.0
+
         self.nll = best_fun
         self.fit_fvals = fvals
         self.fit_fval_mean = float(fvals.mean())
@@ -184,7 +252,12 @@ class DecisionModel:
                 self.policy.forget()
 
             logits = self.policy.logits()
-            c = softmax_sample(logits, beta=self.params["beta"], rng=rng)
+            c = softmax_sample(
+                logits,
+                beta=self.params["beta"],
+                rng=rng,
+                epsilon=self.params.get("epsilon", 0.0),
+            )
 
             p = task.probs[t, c]
             r = int(rng.random() < p)
@@ -251,6 +324,7 @@ class DecisionModel:
             raise ValueError("policy parameters must include 'beta'")
 
         beta = policy.params["beta"]
+        epsilon = policy.params.get("epsilon", 0.0)
         policy.reset()
 
         if isinstance(min_trials_per_block, int):
@@ -278,7 +352,7 @@ class DecisionModel:
 
             while True:
                 logits = policy.logits()
-                c = softmax_sample(logits, beta=beta, rng=rng)
+                c = softmax_sample(logits, beta=beta, rng=rng, epsilon=epsilon)
                 r = int(rng.random() < [p1, p2][c])
 
                 policy.update(c, r)

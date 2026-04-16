@@ -69,6 +69,10 @@ class BasePolicy:
     """
     Subclasses define `parameters = [ParameterSpec(...), ...]`.
 
+    Common decision-stage parameters (``beta``, ``epsilon``) are defined in
+    ``common_parameters`` and merged automatically so every policy inherits
+    them without duplication.
+
     Lifecycle:
         __init__()  → reset()  (policy starts in a valid state)
         reset()     → initialize state for a new session
@@ -77,12 +81,36 @@ class BasePolicy:
         update()    → apply learning update
     """
 
+    common_parameters: List[ParameterSpec] = [
+        ParameterSpec(
+            "beta",
+            (0.1, 10.0),
+            description="Inverse temperature for softmax",
+        ),
+        ParameterSpec(
+            "epsilon",
+            (0.0, 0.3),
+            default=0.0,
+            active=False,
+            description="Lapse rate (probability of random choice)",
+        ),
+    ]
+
     parameters: List[ParameterSpec] = []
+    _disable_common: List[str] = []
 
     def __init__(self):
+        all_params = self.parameters + self.common_parameters
         self._param_specs: Dict[str, ParameterSpec] = {
-            p.name: p.copy() for p in self.parameters
+            p.name: p.copy() for p in all_params
         }
+
+        # Disable common parameters declared by subclass
+        for name in self._disable_common:
+            spec = self._param_specs[name]
+            spec.active = False
+            if spec.default is None:
+                spec.default = 1.0 if name == "beta" else 0.0
 
         # Runtime parameter values after fit() or set_params()
         self.params: Dict[str, float] = {}

@@ -5,6 +5,7 @@ from scipy.ndimage import gaussian_filter1d
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import stats
+from scipy.optimize import curve_fit
 
 
 class BanditTask(DataManager):
@@ -149,12 +150,30 @@ class BanditTask(DataManager):
     def _fix_datetime(datetime):
         if datetime is None:
             return None
-        elif datetime.ndim == 2:
-            datetime = np.squeeze(datetime)
-            datetime = np.array(datetime)
-        elif np.issubdtype(datetime.dtype, np.number):
-            datetime = datetime.astype("datetime64[s]")
-        return datetime
+
+        dt = np.asarray(datetime)
+
+        # Normalize shape to 1D
+        dt = np.squeeze(dt)
+        if dt.ndim == 0:
+            dt = dt.reshape(1)
+        if dt.ndim > 1:
+            raise ValueError("datetime must be 1D or squeezable to 1D")
+
+        # Already datetime-like numpy array
+        if np.issubdtype(dt.dtype, np.datetime64):
+            return dt.astype("datetime64[s]")
+
+        # Numeric input: interpreted as unix epoch seconds
+        if np.issubdtype(dt.dtype, np.number):
+            return dt.astype("datetime64[s]")
+
+        # String/object input: parse via pandas
+        parsed = pd.to_datetime(dt, errors="coerce")
+        if np.any(pd.isna(parsed)):
+            raise ValueError("datetime contains unparseable values")
+
+        return np.asarray(parsed.to_numpy()).astype("datetime64[s]")
 
     @staticmethod
     def _fix_session_ids(session_ids):
@@ -210,6 +229,85 @@ class BanditTask(DataManager):
         window_starts = np.clip(window_starts, 0, 1)
         window_starts[0] = 1
         return window_starts.astype(bool)
+
+    def trial_slice(self, start, stop):
+        """
+        Slice trials [start:stop] within each session.
+
+        Parameters
+        ----------
+        start : int
+            Start trial index within session (0-based, inclusive)
+        stop : int
+            Stop trial index within session (0-based, exclusive)
+
+        Returns
+        -------
+        BanditTask
+            New task containing sliced trials.
+
+        Raises
+        ------
+        ValueError
+            If any session has fewer than `stop` trials.
+        """
+
+        if start < 0 or stop <= start:
+            raise ValueError("Invalid slice bounds: require 0 <= start < stop")
+
+        # Check session lengths
+        too_short = self.sessions[self.ntrials_session < stop]
+        if len(too_short) > 0:
+            raise ValueError(
+                f"Sessions {too_short.tolist()} have fewer than {stop} trials"
+            )
+
+        # Build mask
+        mask = np.zeros(self.n_trials, dtype=bool)
+
+        for sess in self.sessions:
+            sess_idx = np.where(self.session_ids == sess)[0]
+            slice_idx = sess_idx[start:stop]
+            mask[slice_idx] = True
+
+        return self._filtered(mask)
+
+    def filter_by_datetime(self, start=None, stop=None):
+        """Filter trials by datetime range.
+
+        Parameters
+        ----------
+        start : str or np.datetime64, optional
+            Start datetime (inclusive). Can be a string parseable by np.datetime64 or a np.datetime64 object.
+        stop : str or np.datetime64, optional
+            Stop datetime (inclusive). Can be a string parseable by np.datetime64 or a np.datetime64 object.
+
+        Returns
+        -------
+        BanditTask
+            New task containing only trials within the specified datetime range.
+
+        Raises
+        ------
+        ValueError
+            If datetime is not set or if start/stop are invalid.
+        """
+        if self.datetime is None:
+            raise ValueError("datetime must be set to filter by datetime")
+
+        dt = self.datetime.astype("datetime64[s]")
+
+        if start is not None:
+            start_dt = np.datetime64(start)
+            dt_mask = dt >= start_dt
+        else:
+            dt_mask = np.ones_like(dt, dtype=bool)
+
+        if stop is not None:
+            stop_dt = np.datetime64(stop)
+            dt_mask &= dt <= stop_dt
+
+        return self._filtered(dt_mask)
 
     def filter_by_trials(self, min_trials=100, clip_max=None):
         valid_sessions = self.sessions[self.ntrials_session >= min_trials]
@@ -289,6 +387,23 @@ class BanditTask(DataManager):
             mask = (block_ids >= start) & (block_ids <= stop)
 
         return self._filtered(mask)
+
+    def filter_by_expert_status(self, n_days=40, min_days=60):
+        """Filter trials by expert status based on datetime.
+        - Exclude the first `n_days` of data to focus on expert behavior.
+        """
+
+        start_date = self.datetime[0]
+        stop_date = self.datetime[-1]
+        total_days = pd.Timedelta(stop_date - start_date).days
+
+        if total_days > min_days:
+            return self.filter_by_datetime(start=start_date + pd.Timedelta(days=n_days))
+        else:
+            print(
+                f"Total days ({total_days}) less than min_days ({min_days}), not filtering by expert status."
+            )
+            return self
 
     def get_block_start_mask(self, start=None, stop=None, ids=None):
         """
@@ -498,13 +613,13 @@ class Bandit2Arm(BanditTask):
         assert self.n_ports == 2, "Only implemented for 2AB task"
         return np.where(self.choices == 2, 1, 0)  # Port 1: 0 and Port 2: 1
 
-    def get_port_bias(self):
+    def get_port_bias(self, kind="linear"):
         """Get the port bias as a function of delta probability.
 
         Returns
         -------
-        linfit : LinregressResult
-            The result of linear regression between delta probability and choice bias.
+        fitparams : LinregressResult or np.ndarray
+            The result of linear regression or logistic fit between delta probability and choice bias.
         unique_prob_diff : np.ndarray
             Unique delta probabilities.
         choice_diff : np.ndarray
@@ -522,9 +637,52 @@ class Bandit2Arm(BanditTask):
         )
         good_idx = ~np.isnan(choice_diff)
 
-        linfit = stats.linregress(unique_prob_diff[good_idx], choice_diff[good_idx])
+        if kind == "linear":
+            fitparams = stats.linregress(
+                unique_prob_diff[good_idx], choice_diff[good_idx]
+            )
+            y_est = fitparams.slope * unique_prob_diff + fitparams.intercept
+        elif kind == "logistic":
 
-        return linfit, unique_prob_diff, choice_diff
+            def logistic(x, ymin, ymax, k, x0):
+                return ymin + (ymax - ymin) / (1 + np.exp(-k * (x - x0)))
+
+            p0 = [
+                np.min(choice_diff),
+                np.max(choice_diff),
+                1.0,
+                np.median(unique_prob_diff),
+            ]
+            popt, _ = curve_fit(
+                logistic,
+                unique_prob_diff[good_idx],
+                choice_diff[good_idx],
+                p0=p0,
+                maxfev=10000,
+                method="trf",
+            )
+
+            fitparams = popt  # L, x0, k
+            y_est = logistic(unique_prob_diff, *popt)
+        elif kind == "tanh":
+
+            def tanh_model(x, A, k, x0):
+                return A * np.tanh(k * (x - x0))
+
+            p0 = [np.max(np.abs(choice_diff)), 1.0, np.median(unique_prob_diff)]
+            fitparams, _ = curve_fit(
+                tanh_model,
+                unique_prob_diff[good_idx],
+                choice_diff[good_idx],
+                p0=p0,
+                maxfev=10000,
+                method="trf",
+            )
+            y_est = tanh_model(unique_prob_diff, *fitparams)
+        else:
+            raise ValueError("kind must be 'linear', 'logistic' or 'tanh'")
+
+        return fitparams, unique_prob_diff, choice_diff, y_est
 
     @staticmethod
     def from_csv(
@@ -585,9 +743,6 @@ class Bandit2Arm(BanditTask):
             metadata=None,
         )
 
-    def trim_sessions(self, trial_start, trial_stop):
-        pass
-
     def filter_by_probs(self, probs):
         """Keep only sessions with probabilities that match the given probabilities.
 
@@ -629,15 +784,15 @@ class Bandit2Arm(BanditTask):
             delta_max = 1
 
         # Calculate the absolute difference between probabilities of the two ports
-        prob_diff = np.abs(np.diff(self.probs, axis=1).flatten())
+        prob_diff = np.abs(np.diff(self.probs, axis=1).flatten().round(2))
 
         # Identify sessions where the probability difference exceeds the threshold
         delta_bool = (prob_diff >= delta_min) & (prob_diff <= delta_max)
-        valid_sessions = np.unique(self.session_ids[delta_bool])
+        # valid_sessions = np.unique(self.session_ids[delta_bool])
 
-        return self.filter_by_session_id(valid_sessions)
+        return self._filtered(delta_bool)
 
-    def get_optimal_choice_probability(self, bin_size=None, as_df=False):
+    def get_optimal_choice_probability(self, bin_size=None):
         """Get probability of choosing high arm on two armed bandit task
 
         Parameters
