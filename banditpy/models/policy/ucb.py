@@ -1,13 +1,12 @@
 import numpy as np
-from .base import BasePolicy, ParameterSpec
+from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
 class EmpiricalUCB(BasePolicy):
-    parameters = [
-        ParameterSpec("explore", (1e-3, 10.0)),
-        ParameterSpec("tau", (0.5, 0.999)),
-        ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-    ]
+    class Params(ParameterGroup):
+        explore = ParameterSpec("explore", (1e-3, 10.0))
+        tau = ParameterSpec("tau", (0.5, 0.999))
+        q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
 
     def reset(self):
         q0 = self.params["q_init"]
@@ -35,13 +34,12 @@ class EmpiricalUCB(BasePolicy):
 
 
 class RLUCB(BasePolicy):
-    parameters = [
-        ParameterSpec("explore", (1e-3, 10.0)),
-        ParameterSpec("tau", (0.5, 0.999)),
-        ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("lr_chosen", (-1.0, 1.0)),
-        ParameterSpec("lr_unchosen", (-1.0, 1.0)),
-    ]
+    class Params(ParameterGroup):
+        explore = ParameterSpec("explore", (1e-3, 10.0))
+        tau = ParameterSpec("tau", (0.5, 0.999))
+        q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
+        lr_chosen = ParameterSpec("lr_chosen", (-1.0, 1.0))
+        lr_unchosen = ParameterSpec("lr_unchosen", (-1.0, 1.0))
 
     def reset(self):
         self.q = np.full(2, self.params["q_init"])
@@ -74,14 +72,13 @@ class RLUCB(BasePolicy):
 
 
 class BayesianUCB(BasePolicy):
-    parameters = [
-        ParameterSpec("explore", (1e-3, 10.0)),
-        ParameterSpec("tau", (0.5, 0.999)),
-        ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-    ]
+    class Params(ParameterGroup):
+        explore = ParameterSpec("explore", (1e-3, 10.0))
+        tau = ParameterSpec("tau", (0.5, 0.999))
+        q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
 
-    def __init__(self, prior_strength=2.0):
-        super().__init__()
+    def __init__(self, prior_strength=2.0, **kwargs):
+        super().__init__(**kwargs)
         self.prior_strength = prior_strength
 
     def reset(self):
@@ -114,16 +111,15 @@ class BayesianUCB(BasePolicy):
 
 
 class RLBayesianUCB(BasePolicy):
-    parameters = [
-        ParameterSpec("explore", (1e-3, 10.0)),
-        ParameterSpec("tau", (0.5, 0.999)),
-        ParameterSpec("q_init", (0.0, 1.0), default=0.5),
-        ParameterSpec("lr_chosen", (-1.0, 1.0)),
-        ParameterSpec("lr_unchosen", (-1.0, 1.0)),
-    ]
+    class Params(ParameterGroup):
+        explore = ParameterSpec("explore", (1e-3, 10.0))
+        tau = ParameterSpec("tau", (0.5, 0.999))
+        q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
+        lr_chosen = ParameterSpec("lr_chosen", (-1.0, 1.0))
+        lr_unchosen = ParameterSpec("lr_unchosen", (-1.0, 1.0))
 
-    def __init__(self, prior_strength=2.0):
-        super().__init__()
+    def __init__(self, prior_strength=2.0, **kwargs):
+        super().__init__(**kwargs)
         self.prior_strength = prior_strength
 
     def reset(self):

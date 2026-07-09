@@ -124,8 +124,8 @@ class BanditTask(DataManager):
         else:
             self.stops = None
 
-        self.window_ids = window_ids
-        self.block_ids = block_ids
+        self.window_ids = self._fix_window_ids(window_ids)
+        self.block_ids = self._fix_block_ids(block_ids, self.window_ids)
         self.datetime = self._fix_datetime(datetime)
 
         self.sessions, self.ntrials_session = np.unique(
@@ -189,7 +189,46 @@ class BanditTask(DataManager):
                 np.diff(np.append(session_starts, len(session_ids))),
             )
 
+        # Shift to 1-based only if 0-based
+        if session_ids.min() == 0:
+            session_ids = session_ids + 1
+
         return session_ids
+
+    @staticmethod
+    def _fix_window_ids(window_ids):
+        """Shift window_ids to 1-based if 0-based."""
+        if window_ids is None:
+            return None
+        window_ids = np.asarray(window_ids)
+        if window_ids.min() == 0:
+            window_ids = window_ids + 1
+        return window_ids
+
+    @staticmethod
+    def _fix_block_ids(block_ids, window_ids):
+        """Shift block_ids to 1-based if 0-based, checked per window."""
+        if block_ids is None:
+            return None
+        block_ids = np.asarray(block_ids, dtype=int)
+        if window_ids is not None:
+            window_ids = np.asarray(window_ids)
+            for w in np.unique(window_ids):
+                mask = window_ids == w
+                if block_ids[mask].min() == 0:
+                    block_ids[mask] = block_ids[mask] + 1
+        else:
+            if block_ids.min() == 0:
+                block_ids = block_ids + 1
+        return block_ids
+
+    @property
+    def n_days(self):
+        if self.datetime is None:
+            raise ValueError("datetime must be set to compute n_days")
+        first_date = self.datetime[0]
+        last_date = self.datetime[-1]
+        return int(np.ceil((last_date - first_date) / np.timedelta64(1, "D")))
 
     @property
     def n_ports(self):
@@ -388,22 +427,39 @@ class BanditTask(DataManager):
 
         return self._filtered(mask)
 
-    def filter_by_expert_status(self, n_days=40, min_days=60):
-        """Filter trials by expert status based on datetime.
-        - Exclude the first `n_days` of data to focus on expert behavior.
+    def filter_by_days(self, start: int = None, stop: int = None):
+        """Filter by day offset from the first trial's date.
+
+        Parameters
+        ----------
+        start : int, optional
+            Skip the first `start` days (inclusive offset from day 0).
+        stop : int, optional
+            Exclude trials after `stop` days from the first trial.
+
+        Returns
+        -------
+        BanditTask
+            Filtered task containing only trials within the specified day range.
         """
 
-        start_date = self.datetime[0]
-        stop_date = self.datetime[-1]
-        total_days = pd.Timedelta(stop_date - start_date).days
+        if self.datetime is None:
+            raise ValueError("datetime is not set, cannot filter by days.")
 
-        if total_days > min_days:
-            return self.filter_by_datetime(start=start_date + pd.Timedelta(days=n_days))
-        else:
-            print(
-                f"Total days ({total_days}) less than min_days ({min_days}), not filtering by expert status."
-            )
-            return self
+        first_date = self.datetime[0]
+        total_days = (self.datetime[-1] - first_date) / np.timedelta64(1, "D")
+
+        if start is not None and start > total_days:
+            raise ValueError(f"start ({start}) exceeds total days ({total_days:.0f}).")
+        if stop is not None and stop > total_days:
+            raise ValueError(f"stop ({stop}) exceeds total days ({total_days:.0f}).")
+        if start is not None and stop is not None and stop <= start:
+            raise ValueError(f"stop ({stop}) must be greater than start ({start}).")
+
+        start_dt = first_date + pd.Timedelta(days=start) if start is not None else None
+        stop_dt = first_date + pd.Timedelta(days=stop) if stop is not None else None
+
+        return self.filter_by_datetime(start=start_dt, stop=stop_dt)
 
     def get_block_start_mask(self, start=None, stop=None, ids=None):
         """
@@ -1008,6 +1064,217 @@ class Bandit2Arm(BanditTask):
         out["reward_diff"] = np.abs(out["emp_rew"] - out["prog_rew"])
 
         return out
+
+    def get_perf_per_day(
+        self,
+        windows_per_day: int = 3,
+        by: str = "window",
+        day_start_hour: int = 0,
+        fill_missing: bool = False,
+        min_trials_per_day: int = 0,
+        _return_dates: bool = False,
+    ):
+        """Per-day mean P(high-reward choice), averaged over all windows and blocks.
+
+        Parameters
+        ----------
+        windows_per_day : int, optional
+            Number of time windows per day. Used when by='window'. Default is 3.
+        by : {'window', 'datetime'}, optional
+            How to group trials into days.
+
+            - 'window': group `window_ids` in consecutive chunks of
+              `windows_per_day`. Requires `window_ids` to be set.
+            - 'datetime': group by calendar date extracted from
+              `self.datetime`. Requires `datetime` to be set.
+
+            Default is 'window'.
+        day_start_hour : int, optional
+            Hour (0-23) at which a new experimental day begins. Used only
+            when by='datetime'. Timestamps are shifted back by this many
+            hours before grouping, so that e.g. day_start_hour=19 treats
+            7 PM as the start of a new day. Default is 0 (midnight).
+        fill_missing : bool, optional
+            Only used when by='datetime'. If True, the returned array
+            spans every calendar day from the first to the last experimental
+            day; days with no data (or fewer than min_trials_per_day
+            trials) are filled with np.nan. If False (default),
+            only days that have sufficient data are included and the array
+            is compact (no NaNs).
+        min_trials_per_day : int, optional
+            Minimum number of trials a day must have to be included. Days
+            with fewer trials are treated as missing (np.nan when
+            fill_missing=True, silently skipped otherwise). Default is 0
+            (include all days that have any data).
+
+        Returns
+        -------
+        np.ndarray
+            Array of shape (n_days,) with mean P(High) for each day.
+            When fill_missing=True, missing days are np.nan.
+        """
+        if by == "datetime":
+            assert self.datetime is not None, "datetime must be set on the task"
+            assert 0 <= day_start_hour <= 23, "day_start_hour must be between 0 and 23"
+            shifted = pd.DatetimeIndex(self.datetime) - pd.Timedelta(
+                hours=day_start_hour
+            )
+            dates = shifted.normalize()
+            unique_dates = sorted(dates.unique())
+
+            if fill_missing:
+                # Build a full range from first to last date
+                all_dates = pd.date_range(unique_dates[0], unique_dates[-1], freq="D")
+                perf_map = {}
+                for date in unique_dates:
+                    mask = dates == date
+                    if mask.sum() >= max(min_trials_per_day, 1):
+                        perf_map[date] = self.is_choice_high[mask].mean()
+                perf_arr = np.array([perf_map.get(d, np.nan) for d in all_dates])
+                if _return_dates:
+                    return perf_arr, list(all_dates)
+                return perf_arr
+            else:
+                daily_perf = []
+                dates_list = []
+                for date in unique_dates:
+                    mask = dates == date
+                    if mask.sum() >= max(min_trials_per_day, 1):
+                        daily_perf.append(self.is_choice_high[mask].mean())
+                        dates_list.append(date)
+                perf_arr = np.array(daily_perf)
+                if _return_dates:
+                    return perf_arr, dates_list
+                return perf_arr
+        else:
+            assert self.window_ids is not None, "window_ids must be set on the task"
+            unique_windows = np.unique(self.window_ids)
+            n_days = len(unique_windows) // windows_per_day
+            daily_perf = []
+            dates_list = []
+            for d in range(n_days):
+                day_windows = unique_windows[
+                    d * windows_per_day : (d + 1) * windows_per_day
+                ]
+                mask = np.isin(self.window_ids, day_windows)
+                dt = (
+                    self.datetime[mask][0]
+                    if (self.datetime is not None and mask.any())
+                    else None
+                )
+                if mask.sum() >= max(min_trials_per_day, 1):
+                    daily_perf.append(self.is_choice_high[mask].mean())
+                    dates_list.append(dt)
+                elif fill_missing:
+                    daily_perf.append(np.nan)
+                    dates_list.append(None)
+            perf_arr = np.array(daily_perf)
+            if _return_dates:
+                return perf_arr, dates_list
+            return perf_arr
+
+    def get_expertise_day(
+        self,
+        windows_per_day: int = 3,
+        by: str = "window",
+        day_start_hour: int = 0,
+        fill_missing: bool = False,
+        min_trials_per_day: int = 0,
+        n_consecutive: int = 3,
+        threshold_pct: float = 50,
+        baseline_frac: float = 1.0,
+    ):
+        """Find the first day the animal became an expert.
+
+        Pipeline:
+        1. Compute raw per-day performance via get_perf_per_day.
+        2. Apply a trailing rolling mean of n_consecutive non-missing days to
+           produce smoothed_perf. This reduces noise so that single bad days
+           do not obscure genuine expertise.
+        3. Compute the threshold as threshold_pct percentile of
+           smoothed_perf over the first baseline_frac fraction of days. Using
+           only the early phase (baseline_frac < 1.0) prevents the threshold
+           from being inflated by expert-phase performance.
+        4. Return the first day where smoothed_perf >= threshold.
+
+        Because the rolling mean already encodes a "sustained" requirement,
+        no additional consecutive-day streak logic is needed.
+
+        Missing days (np.nan) are skipped when building the rolling mean and
+        excluded from the baseline percentile calculation.
+
+        Parameters
+        ----------
+        windows_per_day : int, optional
+            Number of time windows per day. Used when by='window'. Default is 3.
+        by : {'window', 'datetime'}, optional
+            How to group trials into days. Passed directly to
+            get_perf_per_day. Default is 'window'.
+        day_start_hour : int, optional
+            Hour (0-23) at which a new experimental day begins. Passed
+            directly to get_perf_per_day. Only used when by='datetime'.
+            Default is 0 (midnight).
+        fill_missing : bool, optional
+            Passed directly to get_perf_per_day. Default is False.
+        min_trials_per_day : int, optional
+            Passed directly to get_perf_per_day. Default is 0.
+        n_consecutive : int, optional
+            Rolling window size in non-missing days. Controls how much
+            smoothing is applied before threshold detection. Default is 3.
+        threshold_pct : float, optional
+            Percentile of the smoothed baseline performance used as the
+            expertise threshold. Default is 50 (median).
+        baseline_frac : float, optional
+            Fraction of total days (0 < baseline_frac <= 1.0) from the start
+            of training used to derive the threshold. 1.0 uses all days
+            (default). Set to e.g. 0.3 to anchor the threshold to the early
+            learning phase and avoid inflation by expert-phase performance.
+
+        Returns
+        -------
+        expertise_day : int or None
+            0-based index into perf_per_day of the first day where the
+            n_consecutive-day trailing mean of performance >= threshold, or
+            None if the criterion is never met.
+        expertise_datetime : datetime-like or None
+            Datetime corresponding to expertise_day, or None.
+        threshold : float
+            The threshold value derived from the smoothed baseline.
+        perf_per_day : np.ndarray
+            Raw per-day performance array (unsmoothed).
+        """
+        perf_per_day, dates_array = self.get_perf_per_day(
+            windows_per_day=windows_per_day,
+            by=by,
+            day_start_hour=day_start_hour,
+            fill_missing=fill_missing,
+            min_trials_per_day=min_trials_per_day,
+            _return_dates=True,
+        )
+
+        # Step 1: rolling mean over non-missing days, mapped back to full array
+        valid_idx = [i for i, v in enumerate(perf_per_day) if not np.isnan(v)]
+        valid_vals = np.array([perf_per_day[i] for i in valid_idx])
+
+        smoothed_perf = np.full(len(perf_per_day), np.nan)
+        kernel = np.ones(n_consecutive) / n_consecutive
+        # mode='valid' yields len(valid_vals) - n_consecutive + 1 trailing means;
+        # result[j] = mean(valid_vals[j : j+n_consecutive]), mapped to valid_idx[j+n_consecutive-1]
+        for j, val in enumerate(np.convolve(valid_vals, kernel, mode="valid")):
+            smoothed_perf[valid_idx[j + n_consecutive - 1]] = val
+
+        # Step 2: threshold from smoothed baseline phase
+        assert 0 < baseline_frac <= 1.0, "baseline_frac must be in (0, 1]"
+        n_baseline = max(int(len(smoothed_perf) * baseline_frac), 1)
+        threshold = float(np.nanpercentile(smoothed_perf[:n_baseline], threshold_pct))
+
+        # Step 3: first day where smoothed performance >= threshold
+        for i, v in enumerate(smoothed_perf):
+            if not np.isnan(v) and v >= threshold:
+                expertise_datetime = dates_array[i] if i < len(dates_array) else None
+                return i, expertise_datetime, threshold, perf_per_day
+
+        return None, None, threshold, perf_per_day
 
 
 class Bandit4Arm(BanditTask):

@@ -1,5 +1,6 @@
 import numpy as np
-from banditpy.models.policy.base import BasePolicy, ParameterSpec
+from banditpy.models.policy.base import BasePolicy, ParameterGroup, ParameterSpec
+from .beta_schedule import NoBeta
 
 
 def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
@@ -21,14 +22,13 @@ class Qlearn2Arm(BasePolicy):
     Q[unchosen] += alpha_u * (reward - Q[choice])
     """
 
-    parameters = [
-        ParameterSpec(
-            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
-        ),
-        ParameterSpec(
-            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
-        ),
-    ]
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (-0.99, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
 
     def reset(self):
         self.q = np.full(2, 0.5)
@@ -65,17 +65,16 @@ class QlearnBias2Arm(BasePolicy):
     logit[1] = Q[1] - bias
     """
 
-    parameters = [
-        ParameterSpec(
-            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
-        ),
-        ParameterSpec(
-            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
-        ),
-        ParameterSpec(
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 0.99), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
+        )
+        bias = ParameterSpec(
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
-        ),
-    ]
+        )
 
     def reset(self):
         self.q = np.full(2, 0.5)
@@ -101,17 +100,22 @@ class QlearnBias2Arm(BasePolicy):
 
 
 class QlearnH2Arm(BasePolicy):
+    """Qlearn with perseverance term to add sticky behaviour i.e, propensity to chhoose the same port irrespective of the reward."""
 
-    parameters = [
-        ParameterSpec("alpha_c", (-1.0, 1.0), description="Learning rate (chosen)"),
-        ParameterSpec("alpha_u", (-1.0, 1.0), description="Learning rate (unchosen)"),
-        ParameterSpec("alpha_h", (0.0, 1.0), description="Perseverance learning"),
-        ParameterSpec("scaler", (1, 10.0), description="Perseverance scale"),
-    ]
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (-1.0, 1.0), description="Learning rate (chosen)"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (-1.0, 1.0), description="Learning rate (unchosen)"
+        )
+        alpha_h = ParameterSpec(
+            "alpha_h", (0.0, 1.0), description="Perseverance learning"
+        )
+        scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
 
-    def __init__(self):
-        super().__init__()
-        self.bounds["beta"] = (0.01, 20.0)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def reset(self):
         self.q0 = 0.5
@@ -161,34 +165,41 @@ class QlearnHierarchical2Arm(BasePolicy):
 
     A meta-controller mixes two option policies. Each option holds its own
     action values; the meta-controller maintains option values. Action
-    probabilities are a mixture of option policies. Updates use soft
-    responsibilities over options given the chosen action.
+    probabilities are a mixture of option policies, with ``beta_meta`` and
+    ``beta_option`` controlling exploration at each level. ``logits()``
+    returns log-probabilities, so this policy uses ``NoBeta`` by default.
+    Updates use soft responsibilities over options given the chosen action.
     """
 
-    _disable_common = ["beta"]
+    # _disable_common = [""]
 
-    parameters = [
-        ParameterSpec("alpha_q", (0.0, 1.0), description="LR for option Q-values"),
-        ParameterSpec(
+    default_beta_schedule = NoBeta
+
+    class Params(ParameterGroup):
+        alpha_q = ParameterSpec(
+            "alpha_q", (0.0, 1.0), description="LR for option Q-values"
+        )
+        alpha_meta = ParameterSpec(
             "alpha_meta", (0.0, 1.0), description="LR for meta option values"
-        ),
-        ParameterSpec("tau", (0.5, 1.0), default=1.0, description="Forgetting factor"),
-        ParameterSpec(
+        )
+        tau = ParameterSpec(
+            "tau", (0.5, 1.0), default=1.0, description="Forgetting factor"
+        )
+        q_init = ParameterSpec(
             "q_init", (0.0, 1.0), default=0.5, description="Initial action value"
-        ),
-        ParameterSpec(
+        )
+        m_init = ParameterSpec(
             "m_init", (-1.0, 1.0), default=0.0, description="Initial meta value"
-        ),
-        ParameterSpec(
+        )
+        beta_meta = ParameterSpec(
             "beta_meta", (0.1, 10.0), description="Inverse temp over options"
-        ),
-        ParameterSpec(
+        )
+        beta_option = ParameterSpec(
             "beta_option", (0.1, 10.0), description="Inverse temp within options"
-        ),
-    ]
+        )
 
-    def __init__(self, n_options: int = 2):
-        super().__init__()
+    def __init__(self, n_options: int = 2, **kwargs):
+        super().__init__(**kwargs)
         self.n_options = n_options
 
     def reset(self):
@@ -260,7 +271,8 @@ class QlearnWM2Arm(BasePolicy):
     Action probabilities:
         p(a) = (1 - w) * softmax(beta_rl * Q_RL) + w * softmax(beta_wm * Q_WM)
 
-    Common beta is disabled; beta_rl and beta_wm control exploration independently.
+    ``beta_rl`` and ``beta_wm`` are internal parameters; the outer softmax
+    in ``DecisionModel`` should be neutralised by pairing with ``NoBeta()``.
 
     Reference
     ---------
@@ -269,15 +281,22 @@ class QlearnWM2Arm(BasePolicy):
     Journal of Neuroscience, 35(7), 1024-1035.
     """
 
-    _disable_common = ["beta"]
+    default_beta_schedule = NoBeta
 
-    parameters = [
-        ParameterSpec("alpha_rl", (0.0, 1.0), description="RL learning rate"),
-        ParameterSpec("beta_rl", (0.1, 20.0), description="RL inverse temperature"),
-        ParameterSpec("beta_wm", (0.1, 20.0), description="WM inverse temperature"),
-        ParameterSpec("decay", (0.0, 1.0), description="Decay rate toward initial Q"),
-        ParameterSpec("w0", (0.0, 1.0), default=0.5, description="Initial WM weight"),
-    ]
+    class Params(ParameterGroup):
+        alpha_rl = ParameterSpec("alpha_rl", (0.0, 1.0), description="RL learning rate")
+        beta_rl = ParameterSpec(
+            "beta_rl", (0.1, 20.0), description="RL inverse temperature"
+        )
+        beta_wm = ParameterSpec(
+            "beta_wm", (0.1, 20.0), description="WM inverse temperature"
+        )
+        decay = ParameterSpec(
+            "decay", (0.0, 1.0), description="Decay rate toward initial Q"
+        )
+        w0 = ParameterSpec(
+            "w0", (0.0, 1.0), default=0.5, description="Initial WM weight"
+        )
 
     def reset(self):
         self.q_rl = np.full(2, 0.5)
@@ -316,3 +335,59 @@ class QlearnWM2Arm(BasePolicy):
 
         # --- WM update (perfect one-shot encoding, lr = 1) ---
         self.q_wm[choice] = float(reward)
+
+
+class QlearnDynamicLR2Arm(BasePolicy):
+    """
+    2-arm Q-learning with dynamic learning rate.
+
+    The learning rate is updated based on the prediction error magnitude.
+    """
+
+    class Params(ParameterGroup):
+        alpha_c = ParameterSpec(
+            "alpha_c", (0.0, 1.0), description="Learning rate for chosen option"
+        )
+        alpha_u = ParameterSpec(
+            "alpha_u", (0.0, 1.0), description="Learning rate for unchosen option"
+        )
+        w_c = ParameterSpec(
+            "w_c",
+            (0.0, 1.0),
+            description="Weight for chosen option learning rate update",
+        )
+        w_u = ParameterSpec(
+            "w_u",
+            (0.0, 1.0),
+            description="Weight for unchosen option learning rate update",
+        )
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+        self.alpha_c = self.params["alpha_c"]
+        self.alpha_u = self.params["alpha_u"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        return self.q.copy()
+
+    def update(self, choice, reward):
+        other = 1 - choice
+        pe = reward - self.q[choice]
+
+        # Update learning rates based on prediction error
+        self.alpha_c += (
+            self.params["w_c"] * abs(pe) + (1 - self.params["w_c"]) * self.alpha_c
+        )
+        self.alpha_u += (
+            self.params["w_u"] * abs(pe) + (1 - self.params["w_u"]) * self.alpha_u
+        )
+
+        # Update Q-values
+        self.q[choice] += self.alpha_c * pe
+        self.q[other] += self.alpha_u * pe
+
+        # Clamp Q-values to [0, 1]
+        np.clip(self.q, 0.0, 1.0, out=self.q)

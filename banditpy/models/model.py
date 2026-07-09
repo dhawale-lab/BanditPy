@@ -34,7 +34,12 @@ def _get_slurm_cpus(default=1):
 
 
 class DecisionModel:
-    def __init__(self, task: Bandit2Arm, policy: BasePolicy, reset_mode="session"):
+    def __init__(
+        self,
+        task: Bandit2Arm,
+        policy: BasePolicy,
+        reset_mode="session",
+    ):
         # Allow passing either an instance or a policy class; normalize to an instance.
         if isinstance(policy, type) and issubclass(policy, BasePolicy):
             policy = policy()
@@ -44,6 +49,7 @@ class DecisionModel:
 
         self.task = task
         self.policy = policy
+        self.beta_schedule = policy.beta_schedule  # convenience alias
 
         self.reset_mode = reset_mode
         self.resets = self._compute_resets(task, reset_mode)
@@ -114,23 +120,21 @@ class DecisionModel:
         check_every=25,
         slack=0.02,
     ):
-        active_names = self.policy.active_parameter_names()
-        params = dict(zip(active_names, theta))
+        policy_names = self.policy.active_parameter_names()
+        all_params = dict(zip(policy_names, theta))
 
         # Fill defaults for inactive parameters
         for name, spec in self.policy.parameter_specs().items():
-            if name not in params:
-                params[name] = spec.default if spec.default is not None else 0.0
+            if name not in all_params:
+                all_params[name] = spec.default if spec.default is not None else 0.0
 
-        self.policy.set_params(params)
+        self.policy.set_params(all_params)
 
         # reset after params are set so policies that read from self.params in reset don't KeyError
         self.policy.reset()
+        self.beta_schedule.reset()
 
-        beta = params["beta"]
-        epsilon = params.get("epsilon", 0.0)
         nll = 0.0
-        n_trials = len(self.choices)
 
         do_early_stop = (
             best_nll is not None
@@ -144,12 +148,19 @@ class DecisionModel:
         ):
             if reset:
                 self.policy.reset()
+                self.beta_schedule.reset()
             else:
                 self.policy.forget()
 
             logits = self.policy.logits()
-            nll -= softmax_loglik(logits, c, beta, epsilon)
+            nll -= softmax_loglik(
+                logits,
+                c,
+                self.beta_schedule.get_beta(),
+                self.beta_schedule.get_epsilon(),
+            )
             self.policy.update(c, r)
+            self.beta_schedule.update()
 
             # Cumulative NLL is monotonic, so this is a safe pruning criterion.
             if do_early_stop and t >= warmup_trials and (t % check_every == 0):
@@ -157,6 +168,33 @@ class DecisionModel:
                     return nll
 
         return nll
+
+    def get_trial_nll(self):
+        """Return per-trial negative log-likelihood."""
+        self.policy.set_params(self.params)
+        self.policy.reset()
+        self.beta_schedule.reset()
+
+        trial_nlls = np.zeros(len(self.choices))
+
+        for t, (c, r, reset) in enumerate(zip(self.choices, self.rewards, self.resets)):
+            if reset:
+                self.policy.reset()
+                self.beta_schedule.reset()
+            else:
+                self.policy.forget()
+
+            logits = self.policy.logits()
+            trial_nlls[t] = -softmax_loglik(
+                logits,
+                c,
+                self.beta_schedule.get_beta(),
+                self.beta_schedule.get_epsilon(),
+            )
+            self.policy.update(c, r)
+            self.beta_schedule.update()
+
+        return trial_nlls
 
     # -------------------- FIT --------------------
 
@@ -180,9 +218,9 @@ class DecisionModel:
 
         print(f"Using {n_jobs} workers")
 
-        bounds_dict = self.policy.get_bounds()
-        names = self.policy.active_parameter_names()
-        bounds = [(n, bounds_dict[n]) for n in names]
+        policy_names = self.policy.active_parameter_names()
+        all_bounds_dict = self.policy.get_bounds()
+        bounds = [(n, all_bounds_dict[n]) for n in policy_names]
 
         seeds = rng.integers(0, 2**32 - 1, size=n_starts)
 
@@ -214,7 +252,7 @@ class DecisionModel:
             progress=progress,
         )
 
-        self.params = dict(zip(names, best_x))
+        self.params = dict(zip(policy_names, best_x))
 
         # Fill defaults for inactive parameters
         for name, spec in self.policy.parameter_specs().items():
@@ -238,6 +276,7 @@ class DecisionModel:
 
         self.policy.set_params(self.params)
         self.policy.reset()
+        self.beta_schedule.reset()
 
         task = self.task
         n_trials = task.n_trials
@@ -248,21 +287,23 @@ class DecisionModel:
         for t in range(n_trials):
             if self.resets[t]:
                 self.policy.reset()
+                self.beta_schedule.reset()
             else:
                 self.policy.forget()
 
             logits = self.policy.logits()
             c = softmax_sample(
                 logits,
-                beta=self.params["beta"],
+                beta=self.beta_schedule.get_beta(),
                 rng=rng,
-                epsilon=self.params.get("epsilon", 0.0),
+                epsilon=self.beta_schedule.get_epsilon(),
             )
 
             p = task.probs[t, c]
             r = int(rng.random() < p)
 
             self.policy.update(c, r)
+            self.beta_schedule.update()
 
             choices[t] = c + 1
             rewards[t] = r
@@ -298,10 +339,11 @@ class DecisionModel:
 
         Args:
             policy: A `BasePolicy` instance (mutated in-place during simulation).
+                Its ``beta_schedule`` attribute controls the softmax temperature.
             reward_schedule: Sequence of `(p1, p2)` tuples; one per block specifying reward probs.
             min_trials_per_block: Int or sequence giving the minimum trials to run per block.
-            params: Optional dict of policy parameters (must include `beta`).
-                If None, assumes the policy was already configured via `policy.set_params()`.
+            params: Optional flat dict of parameters for both policy and its beta_schedule.
+                If None, assumes both objects were already configured via ``set_params()``.
             prob_switch: Float or sequence in (0, 1]; probability of switching after min trials.
                 Example: `min_trials_per_block=100`, `prob_switch=0.02` yields median ~150 trials.
             seed: RNG seed for reproducibility.
@@ -310,6 +352,8 @@ class DecisionModel:
         Returns:
             Bandit2Arm: Simulated task with probs, choices, rewards, and block/session ids.
         """
+        beta_schedule = policy.beta_schedule
+
         rng = np.random.default_rng(seed)
 
         if params is not None:
@@ -320,12 +364,8 @@ class DecisionModel:
                 "call policy.set_params(...) or provide params"
             )
 
-        if "beta" not in policy.params:
-            raise ValueError("policy parameters must include 'beta'")
-
-        beta = policy.params["beta"]
-        epsilon = policy.params.get("epsilon", 0.0)
         policy.reset()
+        beta_schedule.reset()
 
         if isinstance(min_trials_per_block, int):
             min_trials_per_block = [min_trials_per_block] * len(reward_schedule)
@@ -352,10 +392,16 @@ class DecisionModel:
 
             while True:
                 logits = policy.logits()
-                c = softmax_sample(logits, beta=beta, rng=rng, epsilon=epsilon)
+                c = softmax_sample(
+                    logits,
+                    beta=beta_schedule.get_beta(),
+                    rng=rng,
+                    epsilon=beta_schedule.get_epsilon(),
+                )
                 r = int(rng.random() < [p1, p2][c])
 
                 policy.update(c, r)
+                beta_schedule.update()
 
                 probs_list.append([p1, p2])
                 choices.append(c + 1)
@@ -371,6 +417,7 @@ class DecisionModel:
             session_counter += 1
             block_counter += 1
             policy.reset()
+            beta_schedule.reset()
 
         return Bandit2Arm(
             probs=np.asarray(probs_list),
@@ -408,7 +455,7 @@ class DecisionModel:
     def bic(self):
         if self.nll is None:
             raise RuntimeError("Model must be fit before computing BIC.")
-        k = len(self.params)
+        k = len(self.policy.active_parameter_names())
         n = len(self.choices)
         return k * np.log(n) + 2.0 * self.nll
 
@@ -433,28 +480,44 @@ class DecisionModel:
             print("Model is not fit yet. Call fit() first.")
             return
 
-        specs = self.policy.parameter_specs()
-        names = self.policy.param_names()
-
-        print("\nParameters")
-        print("-" * 80)
-
-        # Column layout
-        # name (14) | value (10) | bounds (18) | description (rest)
         header = f"{'name':<14} {'fitted':>10}   {'bounds':<18} description"
+        sep = "-" * 80
+
+        print("\nPolicy parameters")
+        print(sep)
         print(header)
-        print("-" * 80)
-
-        for name in names:
-            v = self.params[name]
-            b = specs[name].bounds
-            desc = specs[name].description or ""
-
+        print(sep)
+        specs = self.policy.parameter_specs()
+        for name in self.policy.param_names():
+            spec = specs[name]
+            if spec.active:
+                v_str = f"{self.params.get(name, float('nan')):>10.4f}"
+            else:
+                v_str = f"{'inactive':>10}"
+            b = spec.bounds
+            desc = spec.description or ""
             bounds_str = f"({b[0]:.4g}, {b[1]:.4g})"
+            print(f"{name:<14} {v_str}   {bounds_str:<18}{desc}")
 
-            print(f"{name:<14} " f"{v:>10.4f}   " f"{bounds_str:<18}" f"{desc}")
+        print("\nBeta schedule parameters")
+        print(sep)
+        beta_specs = self.beta_schedule.parameter_specs()
+        if beta_specs:
+            print(header)
+            print(sep)
+            for name, spec in beta_specs.items():
+                if spec.active:
+                    v_str = f"{self.params.get(name, float('nan')):>10.4f}"
+                else:
+                    v_str = f"{'inactive':>10}"
+                b = spec.bounds
+                desc = spec.description or ""
+                bounds_str = f"({b[0]:.4g}, {b[1]:.4g})"
+                print(f"{name:<14} {v_str}   {bounds_str:<18}{desc}")
+        else:
+            print(f"  (none \u2014 {self.beta_schedule.__class__.__name__})")
 
-        print("-" * 80)
+        print(sep)
         print(f"NLL: {self.nll:.3f}")
         print(f"BIC: {self.bic():.3f}")
 
@@ -475,6 +538,7 @@ class DecisionModel:
                     None if self.fit_fval_std is None else float(self.fit_fval_std)
                 ),
                 policy_type=self.policy.__class__.__name__,
+                beta_schedule_type=self.beta_schedule.__class__.__name__,
             )
         )
         return out

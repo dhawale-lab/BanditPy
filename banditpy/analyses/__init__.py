@@ -1,1 +1,2 @@
 from .switch_probability import SwitchProb2Arm
+from .compressibility import CompressibilityRatio2Arm, lzw_compressed_length

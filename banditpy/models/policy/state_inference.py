@@ -1,5 +1,5 @@
 import numpy as np
-from .base import BasePolicy, ParameterSpec
+from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
 class StateInference2Arm(BasePolicy):
@@ -13,17 +13,17 @@ class StateInference2Arm(BasePolicy):
     with ``beta`` (so ``beta≈10`` reproduces the fixed gain in the reference).
     """
 
-    parameters = [
-        ParameterSpec("c", (0.0, 0.99), description="Observation compatibility"),
-        ParameterSpec("y", (0.0, 0.99), description="Stay bias in state transitions"),
-        ParameterSpec(
+    class Params(ParameterGroup):
+        c = ParameterSpec("c", (0.0, 0.99), description="Observation compatibility")
+        y = ParameterSpec(
+            "y", (0.0, 0.99), description="Stay bias in state transitions"
+        )
+        b0 = ParameterSpec(
             "b0", (0.0, 1.0), default=0.5, description="Initial belief P(s=0)"
-        ),
-    ]
+        )
 
-    def __init__(self):
-        super().__init__()
-        self.bounds["beta"] = (0.1, 20.0)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     def reset(self):
         p0 = np.clip(self.params["b0"], 1e-6, 1 - 1e-6)
