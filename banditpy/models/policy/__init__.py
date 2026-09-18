@@ -10,11 +10,20 @@ from .beta_schedule import (
 )
 from .ucb import EmpiricalUCB, RLUCB, BayesianUCB, RLBayesianUCB
 from .qlearn import (
-    Qlearn2Arm,
-    QlearnBias2Arm,
-    QlearnH2Arm,
-    QlearnHierarchical2Arm,
-    QlearnWM2Arm,
+    Qlearn,
+    QlearnSticky,
+    QlearnHierarchical,
+    QlearnWM,
+    QlearnDynamicLR,
+    QlearnAdaptiveLR,
+    QlearnDiff,
 )
-from .thompson import ThompsonShared2Arm, ThompsonSplit2Arm
-from .state_inference import StateInference2Arm
+from .thompson import ThompsonShared, ThompsonSplit
+from .state_inference import StateInference
+from .regime import (
+    Qlearn3Regime,
+    QlearnDiff1StayRegime,
+    QlearnDiff3StayRegime,
+    MoARegime,
+    Qlearn2Regime,
+)

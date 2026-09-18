@@ -23,8 +23,8 @@ class BetaSchedule:
 
     Examples
     --------
-    model = DecisionModel(task, Qlearn2Arm())
-    model = DecisionModel(task, Qlearn2Arm(), beta_schedule=ExponentialBeta())
+    model = DecisionModel(task, Qlearn())
+    model = DecisionModel(task, Qlearn(), beta_schedule=ExponentialBeta())
     model.beta_schedule.params.beta_0.set_bounds(0.5, 20.0)
     """
 
@@ -108,6 +108,8 @@ class StaticBeta(BetaSchedule):
             description="Lapse rate (probability of random choice)",
         )
 
+    params: Params
+
     def get_beta(self) -> float:
         return float(self.params["beta"])
 
@@ -147,6 +149,8 @@ class ExponentialBeta(BetaSchedule):
             active=False,
             description="Lapse rate (probability of random choice)",
         )
+
+    params: Params
 
     def __init__(self):
         super().__init__()
@@ -192,6 +196,8 @@ class LinearBeta(BetaSchedule):
             description="Lapse rate (probability of random choice)",
         )
 
+    params: Params
+
     def __init__(self):
         super().__init__()
         self._t: int = 0
@@ -235,6 +241,8 @@ class PowerLawBeta(BetaSchedule):
             active=False,
             description="Lapse rate (probability of random choice)",
         )
+
+    params: Params
 
     def __init__(self):
         super().__init__()
@@ -290,6 +298,8 @@ class PowerLaw10Beta(BetaSchedule):
             description="Lapse rate (probability of random choice)",
         )
 
+    params: Params
+
     def __init__(self):
         super().__init__()
         self._t: int = 1
@@ -310,7 +320,7 @@ class NoBeta(BetaSchedule):
     Fixed ``beta=1.0``, ``epsilon=0.0`` — no free parameters.
 
     Use for policies that handle their own softmax internally
-    (e.g. ``QlearnWM2Arm``, ``QlearnHierarchical2Arm``). Passing
+    (e.g. ``QlearnWM``, ``QlearnHierarchical``). Passing
     their log-probability logits through softmax with ``beta=1`` is a
     mathematical identity, so no distortion is introduced.
     """

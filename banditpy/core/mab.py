@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 from .data_manager import DataManager
 from scipy import stats
@@ -546,7 +547,7 @@ class BanditTask(DataManager):
 
         return data
 
-    def auto_block_window_ids(self, time_window_min=40):
+    def auto_block_window_ids(self, time_window_min=40, drop_rogue_sessions=False):
         """
         Auto-generate window_ids and block_ids for each trial.
 
@@ -558,6 +559,14 @@ class BanditTask(DataManager):
         ----------
         time_window_min : int
             Time window in minutes for splitting blocks by datetime.
+        drop_rogue_sessions : bool, optional
+            A session is assumed to sit entirely inside one window; if an
+            unexpectedly long gap falls in the *middle* of a session instead
+            of between sessions, that session ends up tagged with more than
+            one block_id ("rogue"). Default False just warns and keeps the
+            data as-is. If True, drop that session's trials entirely
+            (recomputes all derived attributes, e.g. 'sessions'/
+            'ntrials_session', on the reduced data) and still warn.
 
         Returns
         -------
@@ -585,8 +594,42 @@ class BanditTask(DataManager):
         chunks = np.split(session_ids, np.cumsum(counts)[:-1])
         block_ids = np.concatenate([chunk - chunk[0] + 1 for chunk in chunks])
 
+        # A session (one fixed reward-probability stretch) is assumed to sit
+        # entirely inside a single window. If a long enough time gap falls
+        # in the middle of a session, it gets split across two windows and
+        # ends up tagged with two different block_ids — silently breaking
+        # anything downstream that groups trials by block_ids expecting a
+        # 1:1 session->block_id mapping (e.g. reshape-based block averaging).
+        session_block_counts = pd.Series(block_ids).groupby(session_ids).nunique()
+        rogue_sessions = session_block_counts[session_block_counts > 1].index.tolist()
+        if rogue_sessions:
+            if drop_rogue_sessions:
+                warnings.warn(
+                    f"Dropping {len(rogue_sessions)} session(s) that span "
+                    f"more than one window: {rogue_sessions}.",
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"{len(rogue_sessions)} session(s) span more than one window "
+                    f"and were assigned more than one block_id: {rogue_sessions}. "
+                    "This usually means an unexpectedly long time gap fell in "
+                    "the middle of a session rather than between sessions — "
+                    "check these session_ids before relying on block_ids, or "
+                    "pass drop_rogue_sessions=True to drop them automatically.",
+                    stacklevel=2,
+                )
+
         self.block_ids = block_ids
         self.window_ids = window_ids
+
+        if rogue_sessions and drop_rogue_sessions:
+            # Re-derive every trial-level attribute (and recompute 'sessions'/
+            # 'ntrials_session', etc., via __init__) rather than dropping
+            # rows in place, so nothing downstream is left stale.
+            keep_mask = ~np.isin(self.session_ids, rogue_sessions)
+            filtered = self._filtered(keep_mask)
+            self.__dict__.update(filtered.__dict__)
 
 
 class Bandit2Arm(BanditTask):
@@ -851,58 +894,208 @@ class Bandit2Arm(BanditTask):
     def get_optimal_choice_probability(self, bin_size=None):
         """Get probability of choosing high arm on two armed bandit task
 
+        .. deprecated::
+            For per-trial performance, use `get_performance(by="choice")`
+            instead. Note `get_performance`'s `window` argument bins
+            *trials*, not sessions like `bin_size` here — the two aren't
+            interchangeable, so this method keeps its own implementation
+            rather than delegating.
+
         Parameters
         ----------
         bin_size : int, optional
             no.of sessions over which performance is calculated, by default None
-        roll_step : int, optional
-            _description_, by default 40
-        delta_prob : _type_, optional
-            _description_, by default None
 
         Returns
         -------
-        _type_
-            _description_
+        array-like
+            Probability of choosing the high arm, per trial position (or
+            per bin of sessions if bin_size is given).
         """
+        warnings.warn(
+            "'get_optimal_choice_probability' is deprecated, use "
+            "'get_performance(by=\"choice\")' instead (note: its 'window' "
+            "argument bins trials, not sessions like this method's bin_size).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
-        assert self.n_ports == 2, "This method is only implemented for 2AB task"
-
-        # converting into n_sessions x n_trials dataframe and then into numpy array, converting to dataframe automatically handles the NaN values for sessions which has fewer trials
         is_choice_high_per_session = pd.DataFrame(
             np.split(
                 self.is_choice_high.astype(int), np.cumsum(self.ntrials_session)[:-1]
             )
         ).to_numpy()
 
-        assert (
-            is_choice_high_per_session.shape[0] == self.n_sessions
-        ), f"Number of sessions not matching"
-
         if bin_size is not None:
-
             sess_div_perf = np.array_split(
                 is_choice_high_per_session, self.n_sessions // bin_size, axis=0
             )
-            sess_div_perf = np.array([np.nanmean(_, axis=0) for _ in sess_div_perf])
-        else:
-            sess_div_perf = np.nanmean(is_choice_high_per_session, axis=0)
+            return np.array([np.nanmean(_, axis=0) for _ in sess_div_perf])
 
-        return sess_div_perf
+        return np.nanmean(is_choice_high_per_session, axis=0)
 
     def get_reward_probability(self):
         """Get the reward probabilities across sessions.
+
+        .. deprecated::
+            Use `get_performance(by="reward")` instead.
 
         Returns
         -------
         array-like
             The reward probabilities for each session.
         """
-        session_rewards = pd.DataFrame(
-            np.hsplit(self.rewards, np.cumsum(self.ntrials_session)[:-1])
-        ).to_numpy()
+        warnings.warn(
+            "'get_reward_probability' is deprecated, use "
+            "'get_performance(by=\"reward\")' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_performance(by="reward")
 
-        return np.nanmean(session_rewards, axis=0)
+    def _session_curve(self, metric, trial_window=None):
+        """Reshape a per-trial metric into a curve, averaged across sessions.
+
+        Parameters
+        ----------
+        metric : np.ndarray
+            Per-trial values, shape (n_trials,).
+        trial_window : int, optional
+            Number of consecutive trials to average within each session
+            before averaging across sessions (e.g. trial_window=10 to get
+            one value per 10-trial window instead of per trial — useful
+            for stats on coarser bins). Default None (no windowing; one
+            value per trial position). Not to be confused with `window_ids`
+            (experimental time-block, e.g. a 40-min recording chunk) — this
+            windows over trial *count*, not recording time.
+
+        Returns
+        -------
+        array-like
+            Shape (n_trials,), or (n_windows,) if `trial_window` is given.
+        """
+        session_metric = np.split(metric, np.cumsum(self.ntrials_session)[:-1])
+
+        if trial_window is not None:
+            session_metric = [
+                np.array(
+                    [
+                        np.nanmean(sess[i : i + trial_window])
+                        for i in range(0, len(sess), trial_window)
+                    ]
+                )
+                for sess in session_metric
+            ]
+
+        metric_per_session = pd.DataFrame(session_metric).to_numpy()
+        return np.nanmean(metric_per_session, axis=0)
+
+    def _equalized_curve(self, curve_fn, equalize_by, tier_threshold=0.5):
+        """Average `curve_fn` output over probability-condition groups, equally weighted.
+
+        Parameters
+        ----------
+        curve_fn : callable
+            Takes a (filtered) Bandit2Arm instance and returns a 1D curve.
+        equalize_by : {"combo", "deltap", "tier"}
+            How to group trials into probability conditions (see
+            `get_performance` and `SwitchProb2Arm.by_trial`).
+        tier_threshold : float, optional
+            Only used when `equalize_by="tier"`. Default 0.5.
+
+        Returns
+        -------
+        array-like
+            Shape (n_trials,): the per-condition curves averaged with equal weight.
+        """
+        if equalize_by == "combo":
+            group_key = np.sort(np.round(self.probs, 2), axis=1)
+        elif equalize_by == "deltap":
+            group_key = np.abs(np.diff(self.probs, axis=1)).round(2)
+        elif equalize_by == "tier":
+            group_key = (self.probs >= tier_threshold).sum(axis=1, keepdims=True)
+        else:
+            raise ValueError("equalize_by must be None, 'combo', 'deltap' or 'tier'")
+
+        unique_groups = np.unique(group_key, axis=0)
+        curves = []
+        for group in unique_groups:
+            mask = (group_key == group).all(axis=1)
+            subset = self._filtered(mask)
+            if subset.n_trials == 0:
+                continue
+            curves.append(curve_fn(subset))
+
+        return np.nanmean(pd.DataFrame(curves).to_numpy(), axis=0)
+
+    def get_performance(
+        self, by="choice", trial_window=None, equalize_by=None, tier_threshold=0.5
+    ):
+        """Get performance across trials, based on choice or reward.
+
+        Parameters
+        ----------
+        by : {"choice", "reward"}, optional
+            Metric used to compute performance:
+
+            - "choice": whether the higher-reward-probability arm was
+              chosen (same metric as `get_optimal_choice_probability`).
+            - "reward": reward obtained on each trial (same metric as
+              `get_reward_probability`).
+
+            Default is "choice".
+        trial_window : int, optional
+            Number of consecutive trials to average within each session
+            before averaging across sessions, by default None (one value
+            per trial position). E.g. trial_window=10 gives one value per
+            10-trial window instead of per trial. Not to be confused with
+            `window_ids` (experimental time-block) — this windows over
+            trial count, not recording time.
+        equalize_by : {None, "combo", "deltap", "tier"}, optional
+            Give every probability condition equal weight instead of
+            letting more-sampled conditions dominate the average. If an
+            environment oversamples certain probability pairs relative to
+            other pairs, pooling all trials/sessions together confounds
+            "performance" with which conditions happened to get more data.
+
+            - "combo": performance is computed separately for each unique
+              (order-independent) probability pair, then those curves are
+              averaged with equal weight.
+            - "deltap": same, but grouped by unique |p1 - p2| instead of
+              the exact pair.
+            - "tier": same, but grouped into three coarse tiers by how
+              many arms are at/above `tier_threshold`: "low-low" (0),
+              "high-low" (1), "high-high" (2).
+
+            Default None (pool all trials/sessions as usual). Composable
+            with `trial_window`.
+        tier_threshold : float, optional
+            Probability at/above which an arm counts as "high" when
+            `equalize_by="tier"`. Default 0.5.
+
+        Returns
+        -------
+        array-like
+            Mean performance at each trial position within a session. If
+            `trial_window` is given, shape is (n_windows,); otherwise
+            shape is (n_trials,).
+        """
+        assert self.n_ports == 2, "This method is only implemented for 2AB task"
+
+        if by not in ("choice", "reward"):
+            raise ValueError("by must be 'choice' or 'reward'")
+
+        def metric_fn(task):
+            return task.is_choice_high.astype(int) if by == "choice" else task.rewards
+
+        if equalize_by is not None:
+            return self._equalized_curve(
+                lambda task: task._session_curve(metric_fn(task), trial_window),
+                equalize_by,
+                tier_threshold,
+            )
+
+        return self._session_curve(metric_fn(self), trial_window)
 
     def get_cummulative_reward(self):
         """Get the cumulative rewards for each session.
@@ -1008,9 +1201,9 @@ class Bandit2Arm(BanditTask):
                 if mask.sum() > 100:
                     task_p1p2 = self._filtered(mask)
                     if performance_metric == "optimal_choice":
-                        perf_p1p2 = task_p1p2.get_optimal_choice_probability()
+                        perf_p1p2 = task_p1p2.get_performance(by="choice")
                     if performance_metric == "reward_rate":
-                        perf_p1p2 = task_p1p2.get_reward_probability()
+                        perf_p1p2 = task_p1p2.get_performance(by="reward")
 
                     perf_mat[i1, i2] = perf_p1p2[-n_last_trials:].mean()
 

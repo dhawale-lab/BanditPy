@@ -329,3 +329,10 @@ class BasePolicy:
 
     def update(self, choice, reward):
         raise NotImplementedError
+
+    def get_state(self):
+        """Optional snapshot of internal belief/state for trajectory
+        extraction (e.g. an HMM belief 'b' over latent regimes). Returns
+        None by default; override in subclasses that have such a state.
+        """
+        return None

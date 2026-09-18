@@ -28,7 +28,7 @@ from pathlib import Path
 
 from banditpy.io.datio import dat2ArmIO
 from banditpy.models.model import DecisionModel
-from banditpy.models.policy import Qlearn2Arm, ThompsonShared2Arm
+from banditpy.models.policy import Qlearn, ThompsonShared
 from banditpy.analyses.switch_probability import SwitchProb2Arm
 
 # 1) Load raw logs → Bandit2Arm
@@ -36,12 +36,12 @@ task = dat2ArmIO(Path("/path/to/session_folder"))
 task = task.filter_by_trials(min_trials=80, clip_max=400)
 
 # 2) Fit a policy with multiple random starts
-model = DecisionModel(task, policy=Qlearn2Arm(), reset_mode="session")
+model = DecisionModel(task, policy=Qlearn(), reset_mode="session")
 model.fit(n_starts=20, optimizer="de", n_jobs=4, progress=True)
 print(model.params)
 
 # 3) Compare an alternative policy (shared Thompson sampling)
-th_model = DecisionModel(task, policy=ThompsonShared2Arm(use_analytic=True))
+th_model = DecisionModel(task, policy=ThompsonShared(use_analytic=True))
 th_model.fit(n_starts=10, optimizer="lbfgs")
 print(th_model.params)
 

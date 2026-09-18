@@ -8,6 +8,8 @@ class EmpiricalUCB(BasePolicy):
         tau = ParameterSpec("tau", (0.5, 0.999))
         q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
 
+    params: Params
+
     def reset(self):
         q0 = self.params["q_init"]
         self.q = np.full(2, q0)
@@ -40,6 +42,8 @@ class RLUCB(BasePolicy):
         q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
         lr_chosen = ParameterSpec("lr_chosen", (-1.0, 1.0))
         lr_unchosen = ParameterSpec("lr_unchosen", (-1.0, 1.0))
+
+    params: Params
 
     def reset(self):
         self.q = np.full(2, self.params["q_init"])
@@ -76,6 +80,8 @@ class BayesianUCB(BasePolicy):
         explore = ParameterSpec("explore", (1e-3, 10.0))
         tau = ParameterSpec("tau", (0.5, 0.999))
         q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
+
+    params: Params
 
     def __init__(self, prior_strength=2.0, **kwargs):
         super().__init__(**kwargs)
@@ -117,6 +123,8 @@ class RLBayesianUCB(BasePolicy):
         q_init = ParameterSpec("q_init", (0.0, 1.0), default=0.5)
         lr_chosen = ParameterSpec("lr_chosen", (-1.0, 1.0))
         lr_unchosen = ParameterSpec("lr_unchosen", (-1.0, 1.0))
+
+    params: Params
 
     def __init__(self, prior_strength=2.0, **kwargs):
         super().__init__(**kwargs)

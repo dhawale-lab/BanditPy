@@ -49,29 +49,125 @@ class SwitchProb2Arm:
 
         return switch_probability
 
-    def by_trial(self):
+    def by_trial(
+        self,
+        trial_window=None,
+        split_by_reward=False,
+        equalize_by=None,
+        tier_threshold=0.5,
+    ):
         """Get the probability of switching between ports as a function of trials.
+
+        Captures oscillation/exploration behavior (e.g. sticking with an
+        arm, then quickly switching after a low reward) at each trial
+        position within a session.
+
+        Parameters
+        ----------
+        trial_window : int, optional
+            Number of consecutive trials to average within each session
+            before averaging across sessions, by default None (one value
+            per trial position). E.g. trial_window=10 gives one value per
+            10-trial window instead of per trial — useful for running
+            stats on coarser bins. Not to be confused with `window_ids`
+            (experimental time-block) on the task — this windows over
+            trial count, not recording time.
+        split_by_reward : bool, optional
+            If True, compute switch probability separately conditioned on
+            whether the previous trial was rewarded or not (i.e.
+            win-switch vs. lose-switch), returning a tuple
+            `(switch_after_reward, switch_after_noreward)` instead of a
+            single curve. Trials where the previous outcome doesn't match
+            the condition (and each session's first trial, which has no
+            previous trial) are NaN. Default False.
+        equalize_by : {None, "combo", "deltap", "tier"}, optional
+            Give every probability condition equal weight instead of
+            letting more-sampled conditions dominate the average.
+
+            - "combo": computed separately for each unique
+              (order-independent) probability pair, then those curves are
+              averaged with equal weight.
+            - "deltap": same, but grouped by unique |p1 - p2| instead of
+              the exact pair.
+            - "tier": same, but grouped into three coarse tiers by how
+              many arms are at/above `tier_threshold`: "low-low" (0),
+              "high-low" (1), "high-high" (2).
+
+            Default None (pool all trials/sessions as usual). Composable
+            with `trial_window`.
+        tier_threshold : float, optional
+            Only used when `equalize_by="tier"`. Default 0.5.
 
         Returns
         -------
-        array-like
-            The probability of switching between two ports in the specified session.
+        array-like or tuple of array-like
+            If `split_by_reward` is False: probability of switching at
+            each trial position within a session. Shape (n_trials,), or
+            (n_windows,) if `trial_window` is given. Each session's first
+            trial has no previous choice to compare against, so it is NaN
+            and excluded from the average.
+            If True: tuple `(switch_after_reward, switch_after_noreward)`,
+            each with the same shape.
         """
+        task = self.task
+        assert task.n_ports == 2, "Only implemented for 2AB task"
 
-        # Calculate switches (change in choices)
-        switches = np.diff(self.task.choices, prepend=self.task.choices[0]) != 0
+        def switch_metric(t):
+            session_choices = np.split(t.choices, np.cumsum(t.ntrials_session)[:-1])
+            return np.concatenate(
+                [
+                    np.concatenate(([np.nan], (sess[1:] != sess[:-1]).astype(float)))
+                    for sess in session_choices
+                ]
+            )
 
-        # convert to 2D array of shape (n_sessions, n_trials) and calculate switch probability across sessions and ignore the first trial
-        switch_prob = (
-            pd.DataFrame(np.split(switches, np.cumsum(self.task.ntrials_session)[:-1]))
-            .mean(axis=0)
-            .to_numpy()[1:]
-        )
+        def reward_split_switch_metrics(t):
+            session_choices = np.split(t.choices, np.cumsum(t.ntrials_session)[:-1])
+            session_rewards = np.split(t.rewards, np.cumsum(t.ntrials_session)[:-1])
 
-        # Calculate switch probability across session and ignore the first trial
-        # switch_prob = np.nanmean(switches, axis=0)[1:]
+            after_reward_list = []
+            after_noreward_list = []
+            for ch, rw in zip(session_choices, session_rewards):
+                switch = np.concatenate(([np.nan], (ch[1:] != ch[:-1]).astype(float)))
+                prev_reward = np.concatenate(([np.nan], rw[:-1].astype(float)))
 
-        return switch_prob
+                after_reward_list.append(np.where(prev_reward == 1, switch, np.nan))
+                after_noreward_list.append(np.where(prev_reward == 0, switch, np.nan))
+
+            return np.concatenate(after_reward_list), np.concatenate(after_noreward_list)
+
+        if split_by_reward:
+            if equalize_by is not None:
+                after_reward_curve = task._equalized_curve(
+                    lambda t: t._session_curve(
+                        reward_split_switch_metrics(t)[0], trial_window
+                    ),
+                    equalize_by,
+                    tier_threshold,
+                )
+                after_noreward_curve = task._equalized_curve(
+                    lambda t: t._session_curve(
+                        reward_split_switch_metrics(t)[1], trial_window
+                    ),
+                    equalize_by,
+                    tier_threshold,
+                )
+                return after_reward_curve, after_noreward_curve
+
+            after_reward, after_noreward = reward_split_switch_metrics(task)
+            return (
+                task._session_curve(after_reward, trial_window),
+                task._session_curve(after_noreward, trial_window),
+            )
+
+        if equalize_by is not None:
+            return task._equalized_curve(
+                lambda t: t._session_curve(switch_metric(t), trial_window),
+                equalize_by,
+                tier_threshold,
+            )
+
+        return task._session_curve(switch_metric(task), trial_window)
 
     def by_history(self, n_past):
         """Get the probability of switching between ports as a function of history.

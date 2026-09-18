@@ -13,46 +13,7 @@ def _softmax(x: np.ndarray, beta: float) -> np.ndarray:
     return e / s
 
 
-class Qlearn2Arm(BasePolicy):
-    """
-    Vanilla 2-arm Q-learning with counterfactual updates.
-
-    Update rule:
-    Q[choice] += alpha_c * (reward - Q[choice])
-    Q[unchosen] += alpha_u * (reward - Q[choice])
-    """
-
-    class Params(ParameterGroup):
-        alpha_c = ParameterSpec(
-            "alpha_c", (-0.99, 0.99), description="Learning rate for chosen option"
-        )
-        alpha_u = ParameterSpec(
-            "alpha_u", (-0.99, 0.99), description="Learning rate for unchosen option"
-        )
-
-    def reset(self):
-        self.q = np.full(2, 0.5)
-
-    def forget(self):
-        pass  # no forgetting in vanilla Q-learning
-
-    def logits(self):
-        return self.q.copy()
-
-    def update(self, choice, reward):
-        a_c = self.params["alpha_c"]
-        a_u = self.params["alpha_u"]
-
-        other = 1 - choice
-        pe = reward - self.q[choice]
-
-        self.q[choice] += a_c * pe
-        self.q[other] += a_u * pe
-
-        self.q[:] = np.clip(self.q, 0.0, 1.0)
-
-
-class QlearnBias2Arm(BasePolicy):
+class Qlearn(BasePolicy):
     """
     2-arm Q-learning with counterfactual updates and a port bias term.
 
@@ -75,6 +36,8 @@ class QlearnBias2Arm(BasePolicy):
         bias = ParameterSpec(
             "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
         )
+
+    params: Params
 
     def reset(self):
         self.q = np.full(2, 0.5)
@@ -99,8 +62,9 @@ class QlearnBias2Arm(BasePolicy):
         self.q[:] = np.clip(self.q, 0.0, 1.0)
 
 
-class QlearnH2Arm(BasePolicy):
-    """Qlearn with perseverance term to add sticky behaviour i.e, propensity to chhoose the same port irrespective of the reward."""
+class QlearnSticky(BasePolicy):
+    """Qlearn with a perseverance (sticky) term for the propensity to choose
+    the same port irrespective of reward, plus a static port bias term."""
 
     class Params(ParameterGroup):
         alpha_c = ParameterSpec(
@@ -113,6 +77,11 @@ class QlearnH2Arm(BasePolicy):
             "alpha_h", (0.0, 1.0), description="Perseverance learning"
         )
         scaler = ParameterSpec("scaler", (1, 10.0), description="Perseverance scale")
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+
+    params: Params
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -133,12 +102,13 @@ class QlearnH2Arm(BasePolicy):
 
     def logits(self):
         h = self.h
-        bias0 = h - 0.5
-        bias1 = 0.5 - h
+        stick0 = h - 0.5
+        stick1 = 0.5 - h
+        b = self.params["bias"]
         return np.array(
             (
-                self.q[0] + self.params["scaler"] * bias0,
-                self.q[1] + self.params["scaler"] * bias1,
+                self.q[0] + self.params["scaler"] * stick0 + b,
+                self.q[1] + self.params["scaler"] * stick1 - b,
             ),
             dtype=float,
         )
@@ -159,15 +129,15 @@ class QlearnH2Arm(BasePolicy):
         self.h += p["alpha_h"] * (choice - self.h)
 
 
-class QlearnHierarchical2Arm(BasePolicy):
+class QlearnHierarchical(BasePolicy):
     """
     Two-option hierarchical RL for a 2-armed bandit.
 
     A meta-controller mixes two option policies. Each option holds its own
     action values; the meta-controller maintains option values. Action
-    probabilities are a mixture of option policies, with ``beta_meta`` and
-    ``beta_option`` controlling exploration at each level. ``logits()``
-    returns log-probabilities, so this policy uses ``NoBeta`` by default.
+    probabilities are a mixture of option policies, with 'beta_meta' and
+    'beta_option' controlling exploration at each level. 'logits()'
+    returns log-probabilities, so this policy uses 'NoBeta' by default.
     Updates use soft responsibilities over options given the chosen action.
     """
 
@@ -197,6 +167,8 @@ class QlearnHierarchical2Arm(BasePolicy):
         beta_option = ParameterSpec(
             "beta_option", (0.1, 10.0), description="Inverse temp within options"
         )
+
+    params: Params
 
     def __init__(self, n_options: int = 2, **kwargs):
         super().__init__(**kwargs)
@@ -254,7 +226,7 @@ class QlearnHierarchical2Arm(BasePolicy):
             self.m[k] += am * resp[k] * m_pe
 
 
-class QlearnWM2Arm(BasePolicy):
+class QlearnWM(BasePolicy):
     """
     RL + Working Memory model for 2-arm bandit.
 
@@ -271,8 +243,8 @@ class QlearnWM2Arm(BasePolicy):
     Action probabilities:
         p(a) = (1 - w) * softmax(beta_rl * Q_RL) + w * softmax(beta_wm * Q_WM)
 
-    ``beta_rl`` and ``beta_wm`` are internal parameters; the outer softmax
-    in ``DecisionModel`` should be neutralised by pairing with ``NoBeta()``.
+    'beta_rl' and 'beta_wm' are internal parameters; the outer softmax
+    in 'DecisionModel' should be neutralised by pairing with 'NoBeta()'.
 
     Reference
     ---------
@@ -297,6 +269,8 @@ class QlearnWM2Arm(BasePolicy):
         w0 = ParameterSpec(
             "w0", (0.0, 1.0), default=0.5, description="Initial WM weight"
         )
+
+    params: Params
 
     def reset(self):
         self.q_rl = np.full(2, 0.5)
@@ -337,7 +311,7 @@ class QlearnWM2Arm(BasePolicy):
         self.q_wm[choice] = float(reward)
 
 
-class QlearnDynamicLR2Arm(BasePolicy):
+class QlearnDynamicLR(BasePolicy):
     """
     2-arm Q-learning with dynamic learning rate.
 
@@ -362,6 +336,8 @@ class QlearnDynamicLR2Arm(BasePolicy):
             description="Weight for unchosen option learning rate update",
         )
 
+    params: Params
+
     def reset(self):
         self.q = np.full(2, 0.5)
         self.alpha_c = self.params["alpha_c"]
@@ -377,11 +353,11 @@ class QlearnDynamicLR2Arm(BasePolicy):
         other = 1 - choice
         pe = reward - self.q[choice]
 
-        # Update learning rates based on prediction error
-        self.alpha_c += (
+        # Update learning rates based on prediction error (EWMA toward |pe|)
+        self.alpha_c = (
             self.params["w_c"] * abs(pe) + (1 - self.params["w_c"]) * self.alpha_c
         )
-        self.alpha_u += (
+        self.alpha_u = (
             self.params["w_u"] * abs(pe) + (1 - self.params["w_u"]) * self.alpha_u
         )
 
@@ -391,3 +367,146 @@ class QlearnDynamicLR2Arm(BasePolicy):
 
         # Clamp Q-values to [0, 1]
         np.clip(self.q, 0.0, 1.0, out=self.q)
+
+
+class QlearnAdaptiveLR(BasePolicy):
+    """
+    2-arm Q-learning with a reward-rate dependent adaptive learning rate.
+
+    The learning rate decreases as the recent (EWMA) reward rate rises,
+    capturing the idea that once reward has become reliably predictable
+    (e.g. the animal has settled on the better port), further updates
+    should shrink; a drop in reward rate raises the learning rate back up.
+    This is a simple scalar heuristic, not a reimplementation of any
+    specific published model.
+
+    Note that reward rate is a lagging indicator: right after a reversal
+    it stays high for a few trials before dropping, so the learning rate
+    is briefly slow to recover exactly when fast relearning matters most.
+
+    Update rule:
+    r_bar <- r_bar + w_r * (reward - r_bar)
+    alpha_c <- clip(alpha_c0 - kappa_c * r_bar, 0, 1)
+    alpha_u <- clip(alpha_u0 - kappa_u * r_bar, 0, 1)
+    pe = reward - Q[choice]
+    Q[choice] += alpha_c * pe
+    Q[unchosen] += alpha_u * pe
+    """
+
+    class Params(ParameterGroup):
+        alpha_c0 = ParameterSpec(
+            "alpha_c0",
+            (0.0, 0.99),
+            description="Learning rate for chosen option at zero reward rate",
+        )
+        alpha_u0 = ParameterSpec(
+            "alpha_u0",
+            (-0.99, 0.99),
+            description="Learning rate for unchosen option at zero reward rate",
+        )
+        kappa_c = ParameterSpec(
+            "kappa_c",
+            (0.0, 2.0),
+            description="Drop in chosen learning rate per unit reward rate",
+        )
+        kappa_u = ParameterSpec(
+            "kappa_u",
+            (0.0, 2.0),
+            description="Drop in unchosen learning rate per unit reward rate",
+        )
+        w_r = ParameterSpec(
+            "w_r",
+            (0.02, 0.5),
+            description="EWMA weight for the reward-rate trace",
+        )
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+        self.r_bar = 0.5
+        self.alpha_c = self.params["alpha_c0"]
+        self.alpha_u = self.params["alpha_u0"]
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        b = self.params["bias"]
+        return np.array([self.q[0] + b, self.q[1] - b])
+
+    def update(self, choice, reward):
+        other = 1 - choice
+        pe = reward - self.q[choice]
+
+        self.r_bar += self.params["w_r"] * (reward - self.r_bar)
+
+        self.alpha_c = np.clip(
+            self.params["alpha_c0"] - self.params["kappa_c"] * self.r_bar, 0.0, 1.0
+        )
+        self.alpha_u = np.clip(
+            self.params["alpha_u0"] - self.params["kappa_u"] * self.r_bar, -1.0, 1.0
+        )
+
+        self.q[choice] += self.alpha_c * pe
+        self.q[other] += self.alpha_u * pe
+        np.clip(self.q, 0.0, 1.0, out=self.q)
+
+
+class QlearnDiff(BasePolicy):
+    """
+    2-arm Q-learning driven by the chosen-vs-unchosen value difference.
+
+    Instead of separate learning rates for the chosen and unchosen options,
+    a single alpha scales the update to the difference between them. The
+    difference ranges from -1 to 1, and the reward prediction error compares
+    reward to the absolute value of that difference (how confidently the
+    chosen option was already favoured).
+
+    Update rule:
+    diff = Q[choice] - Q[unchosen]
+    rpe = reward - abs(diff)
+    Q[choice] += alpha * rpe
+    Q[unchosen] -= alpha * rpe
+
+    Choice logits:
+    logit[0] = Q[0] + bias
+    logit[1] = Q[1] - bias
+    """
+
+    class Params(ParameterGroup):
+        alpha = ParameterSpec(
+            "alpha", (0.0, 0.99), description="Learning rate for the chosen/unchosen difference"
+        )
+
+        bias = ParameterSpec(
+            "bias", (-2.0, 2.0), default=0.0, description="Bias toward port 0 vs port 1"
+        )
+
+    params: Params
+
+    def reset(self):
+        self.q = np.full(2, 0.5)
+
+    def forget(self):
+        pass
+
+    def logits(self):
+        b = self.params["bias"]
+        return np.array([self.q[0] + b, self.q[1] - b])
+
+    def update(self, choice, reward):
+        a = self.params["alpha"]
+        other = 1 - choice
+
+        diff = self.q[choice] - self.q[other]
+        rpe = reward - abs(diff)
+
+        delta = a * rpe
+        self.q[choice] += delta
+        self.q[other] -= delta
+
+        self.q[:] = np.clip(self.q, 0.0, 1.0)

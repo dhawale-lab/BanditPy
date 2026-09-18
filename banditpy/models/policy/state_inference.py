@@ -2,7 +2,7 @@ import numpy as np
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
-class StateInference2Arm(BasePolicy):
+class StateInference(BasePolicy):
     """
     Two-state Bayesian state-inference policy.
 
@@ -21,6 +21,8 @@ class StateInference2Arm(BasePolicy):
         b0 = ParameterSpec(
             "b0", (0.0, 1.0), default=0.5, description="Initial belief P(s=0)"
         )
+
+    params: Params
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

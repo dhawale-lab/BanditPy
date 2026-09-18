@@ -5,7 +5,7 @@ import numpy as np
 from .base import BasePolicy, ParameterGroup, ParameterSpec
 
 
-class GP2Arm(BasePolicy):
+class GP(BasePolicy):
     """
     Two-armed bandit policy using independent Gaussian Processes (RBF kernel)
     with UCB action selection.

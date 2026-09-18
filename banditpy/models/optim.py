@@ -19,10 +19,12 @@ class BaseOptimizer:
 
 class LBFGSOptimizer(BaseOptimizer):
     def fit(self, objective, bounds, seeds, n_jobs=1, progress=False):
+        lo_hi = [b for _, b in bounds]
+
         def _run(seed):
             rng = np.random.default_rng(seed)
-            x0 = np.array([rng.uniform(*b) for b in bounds])
-            res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+            x0 = np.array([rng.uniform(*b) for b in lo_hi])
+            res = minimize(objective, x0, method="L-BFGS-B", bounds=lo_hi)
             return res.fun, res.x
 
         iterator = seeds
@@ -48,10 +50,12 @@ class DEOptimizer(BaseOptimizer):
         self.tol = tol
 
     def fit(self, objective, bounds, seeds, n_jobs=1, progress=False):
+        lo_hi = [b for _, b in bounds]
+
         def _run(seed):
             res = differential_evolution(
                 objective,
-                bounds=bounds,
+                bounds=lo_hi,
                 maxiter=self.maxiter,
                 popsize=self.popsize,
                 tol=self.tol,
